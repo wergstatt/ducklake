@@ -18,13 +18,7 @@ public:
 	explicit DuckLakeMetadataManagerV1_1(DuckLakeTransaction &transaction) : Base(transaction) {
 	}
 
-	string GetSchemaTableStatement() override;
-	string GetDataFileTableStatement() override;
-	string GetDeleteFileTableStatement() override;
-	string GetFileColumnStatsTableStatement() override;
-	string GetTableColumnStatsTableStatement() override;
-	string GetCreateTableStatements() override;
-	string GetVersionString() override;
+	DuckLakeVersion GetVersion() override;
 };
 
 } // namespace duckdb

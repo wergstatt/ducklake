@@ -17,6 +17,7 @@ add_library(
   ducklake_catalog_set.cpp
   ducklake_metadata_manager.cpp
   ducklake_metadata_profile.cpp
+  ducklake_metadata_schema.cpp
   ducklake_multi_file_list.cpp
   ducklake_storage.cpp
   ducklake_delete.cpp

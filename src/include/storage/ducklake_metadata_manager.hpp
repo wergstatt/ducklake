@@ -17,6 +17,7 @@
 #include "duckdb/common/types/value.hpp"
 #include "common/ducklake_row_helpers.hpp"
 #include "common/ducklake_snapshot.hpp"
+#include "common/ducklake_version.hpp"
 #include "storage/ducklake_partition_data.hpp"
 #include "storage/ducklake_stats.hpp"
 #include "duckdb/common/types/timestamp.hpp"
@@ -295,15 +296,8 @@ public:
 
 	//! Initialize a new DuckLake
 	virtual void InitializeDuckLake(bool has_explicit_schema, DuckLakeEncryption encryption);
-	//! Get the CREATE TABLE statements for all metadata tables
-	virtual string GetCreateTableStatements();
-	virtual string GetSchemaTableStatement();
-	virtual string GetDataFileTableStatement();
-	virtual string GetDeleteFileTableStatement();
-	virtual string GetFileColumnStatsTableStatement();
-	virtual string GetTableColumnStatsTableStatement();
-	//! Get the version string written to ducklake_metadata
-	virtual string GetVersionString();
+	//! The DuckLake version of the metadata tables that this manager creates
+	virtual DuckLakeVersion GetVersion();
 	virtual DuckLakeMetadata LoadDuckLake();
 
 	//! Runs the statements of a batch, after substituting the placeholders of the commit snapshot
@@ -415,8 +409,10 @@ public:
 	static string GetInlinedTablesBeforeSchemaChangeSql(TableIndex table_id);
 	//! The top-level columns of each inlined data table at the schema version of that table
 	static string GetInlinedTableColumnsSql(optional_idx table_id = optional_idx());
-	//! The inserts of the given rows, in batches
+	//! The inserts of the given rows into the named columns of a metadata table, in batches
 	static string InsertValuesSql(const string &table_name, const vector<string> &values);
+	//! The inserts into a metadata table whose columns depend on the version of the metadata, in batches
+	static string InsertValuesSql(const string &table_name, const vector<string> &values, bool supports_v1_1_metadata);
 	//! The inserts of the given rows into the given table, in batches
 	static string InsertValuesIntoSql(const string &qualified_table_name, const vector<string> &values);
 	identifier_set_t GetInlinedTableNames(TableIndex table_id);
@@ -635,7 +631,6 @@ public:
 	virtual void MigrateV04();
 	virtual void MigrateV10(bool from_dev1 = false);
 	virtual void MigrateV11();
-	static string GetSnapshotTagTableStatement();
 	//! Whether the catalog already has every metadata table and column of v1.1
 	bool HasV1_1Additions();
 	//! Renames inlined metadata columns to the prefixed variants, skipping already renamed tables

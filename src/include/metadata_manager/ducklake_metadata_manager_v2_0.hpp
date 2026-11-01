@@ -19,8 +19,7 @@ public:
 	    : DuckLakeMetadataManagerV1_1<Base>(transaction) {
 	}
 
-	string GetCreateTableStatements() override;
-	string GetVersionString() override;
+	DuckLakeVersion GetVersion() override;
 };
 
 } // namespace duckdb

@@ -6,16 +6,8 @@
 namespace duckdb {
 
 template <typename Base>
-string DuckLakeMetadataManagerV2_0<Base>::GetCreateTableStatements() {
-	auto result = DuckLakeMetadataManagerV1_1<Base>::GetCreateTableStatements();
-	result += DuckLakeMetadataManager::GetSnapshotTagTableStatement() + "\n";
-	return result;
-}
-
-template <typename Base>
-string DuckLakeMetadataManagerV2_0<Base>::GetVersionString() {
-	constexpr auto VERSION = DuckLakeVersion::V2_0_DEV1;
-	return DuckLakeVersionToString(VERSION);
+DuckLakeVersion DuckLakeMetadataManagerV2_0<Base>::GetVersion() {
+	return DuckLakeVersion::V2_0_DEV1;
 }
 
 // explicit instantiations for all backends
