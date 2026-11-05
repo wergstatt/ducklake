@@ -5859,13 +5859,22 @@ AND NOT EXISTS (
 		}
 		return cleanup_files;
 	};
+	// the writes go in batches, each sent before a read that depends on them
+	DuckLakeBatch batch;
+	auto execute_batch = [&]() {
+		if (batch.empty()) {
+			return;
+		}
+		auto result = Execute(batch);
+		result->ThrowIfError("Failed to clean up expired snapshots in DuckLake: ");
+		batch = DuckLakeBatch();
+	};
 	auto schedule_for_cleanup = [&](const vector<DuckLakeFileForCleanup> &files) {
 		vector<string> scheduled_deletions;
 		for (auto &file : files) {
 			scheduled_deletions.push_back(ScheduledDeletionTuple(file.id.index, GetRelativePath(file.path)));
 		}
-		auto result = Execute(InsertValuesSql("ducklake_files_scheduled_for_deletion", scheduled_deletions));
-		result->ThrowIfError("Failed to schedule files for clean-up in DuckLake: ");
+		batch += InsertValuesSql("ducklake_files_scheduled_for_deletion", scheduled_deletions);
 	};
 
 	// get a list of files that are no longer required after these deletions
@@ -5883,12 +5892,11 @@ AND NOT EXISTS (
 		tables_to_delete_from = {"ducklake_data_file", "ducklake_file_column_stats", "ducklake_file_variant_stats",
 		                         "ducklake_file_partition_value"};
 		for (auto &delete_tbl : tables_to_delete_from) {
-			result = Execute(StringUtil::Format(R"(
+			batch += StringUtil::Format(R"(
 DELETE FROM {METADATA_CATALOG}.%s
 WHERE data_file_id IN (%s);
 )",
-			                                    delete_tbl, deleted_file_ids));
-			result->ThrowIfError("Failed to delete old data file information in DuckLake: ");
+			                            delete_tbl, deleted_file_ids);
 		}
 		schedule_for_cleanup(cleanup_files);
 	}
@@ -5903,12 +5911,11 @@ WHERE data_file_id IN (%s);
 	auto cleanup_deletes = read_cleanup_files(*result);
 	if (!cleanup_deletes.empty()) {
 		// delete the delete files
-		result = Execute(StringUtil::Format(R"(
+		batch += StringUtil::Format(R"(
 DELETE FROM {METADATA_CATALOG}.ducklake_delete_file
 WHERE delete_file_id IN (%s);
 )",
-		                                    CleanupFileIdList(cleanup_deletes)));
-		result->ThrowIfError("Failed to delete old delete file information in DuckLake: ");
+		                            CleanupFileIdList(cleanup_deletes));
 		schedule_for_cleanup(cleanup_deletes);
 	}
 
@@ -5937,23 +5944,19 @@ WHERE table_id IN (%s);)",
 		    "ducklake_column_tag",      "ducklake_sort_info",           "ducklake_sort_expression",
 		    "ducklake_schema_versions", "ducklake_inlined_data_tables", "ducklake_column_mapping"};
 		for (auto &delete_tbl : tables_to_delete_from) {
-			auto result = Execute(StringUtil::Format(R"(
+			batch += StringUtil::Format(R"(
 DELETE FROM {METADATA_CATALOG}.%s
 WHERE table_id IN (%s);)",
-			                                         delete_tbl, deleted_table_ids));
-			result->ThrowIfError("Failed to delete from " + delete_tbl + " in DuckLake: ");
+			                            delete_tbl, deleted_table_ids);
 		}
-		auto options_result = Execute(StringUtil::Format(R"(
+		batch += StringUtil::Format(R"(
 DELETE FROM {METADATA_CATALOG}.ducklake_metadata
 WHERE scope = 'table' AND scope_id IN (%s);)",
-		                                                 deleted_table_ids));
-		options_result->ThrowIfError("Failed to delete table options in DuckLake: ");
+		                            deleted_table_ids);
 
 		// Drop orphaned inlined tables
 		for (auto &inlined_table_name : inlined_tables_to_drop) {
-			auto result =
-			    Execute(StringUtil::Format("DROP TABLE IF EXISTS {METADATA_CATALOG}.%s;", inlined_table_name));
-			result->ThrowIfError("Failed to drop inlined-data table in DuckLake: ");
+			batch += StringUtil::Format("DROP TABLE IF EXISTS {METADATA_CATALOG}.%s;", inlined_table_name);
 		}
 	}
 
@@ -5965,35 +5968,25 @@ WHERE scope = 'table' AND scope_id IN (%s);)",
 	if (transaction.GetCatalog().SupportsSnapshotTags()) {
 		tables_to_delete_from.push_back("ducklake_snapshot_tag");
 	}
-	bool deleted_schemas = false;
 	for (auto &delete_tbl : tables_to_delete_from) {
-		auto result = Execute(StringUtil::Format(R"(
+		batch += StringUtil::Format(R"(
 DELETE FROM {METADATA_CATALOG}.%s
 WHERE end_snapshot IS NOT NULL AND NOT EXISTS(
     SELECT snapshot_id
     FROM {METADATA_CATALOG}.ducklake_snapshot
     WHERE snapshot_id >= begin_snapshot AND snapshot_id < end_snapshot
 );)",
-		                                         delete_tbl));
-		result->ThrowIfError("Failed to delete from " + delete_tbl + " in DuckLake: ");
-		if (delete_tbl == "ducklake_schema") {
-			// a result without a row count is treated as a deletion
-			deleted_schemas = true;
-			for (auto &row : *result) {
-				deleted_schemas = row.GetValue<int64_t>(0) > 0;
-			}
-		}
+		                            delete_tbl);
 	}
-	if (deleted_schemas) {
-		auto options_result = Execute(R"(
+	// the options of schemas that no longer exist
+	batch += R"(
 DELETE FROM {METADATA_CATALOG}.ducklake_metadata
 WHERE scope = 'schema' AND NOT EXISTS(
     SELECT schema_id
     FROM {METADATA_CATALOG}.ducklake_schema
     WHERE schema_id = scope_id
-);)");
-		options_result->ThrowIfError("Failed to delete schema options in DuckLake: ");
-	}
+);)";
+	execute_batch();
 
 	// A v1.1 catalog prefixes the bound column names, so inlined tables cannot share the statement
 	// above. Runs after the drop block, so dropped tables are already unregistered and this needs
@@ -6004,30 +5997,28 @@ WHERE scope = 'schema' AND NOT EXISTS(
 		auto col_names = InlinedColNames();
 		for (auto &row : *inlined) {
 			auto inlined_table_name = row.GetValue<Identifier>(0);
-			auto result = Execute(StringUtil::Format(R"(
+			batch += StringUtil::Format(R"(
 DELETE FROM {METADATA_CATALOG}.%s
 WHERE %s IS NOT NULL AND NOT EXISTS(
     SELECT snapshot_id
     FROM {METADATA_CATALOG}.ducklake_snapshot
     WHERE snapshot_id >= %s AND snapshot_id < %s
 );)",
-			                                         inlined_table_name, col_names.end_snapshot,
-			                                         col_names.begin_snapshot, col_names.end_snapshot));
-			result->ThrowIfError(StringUtil::Format("Failed to delete from %s in DuckLake: ", inlined_table_name));
+			                            inlined_table_name, col_names.end_snapshot, col_names.begin_snapshot,
+			                            col_names.end_snapshot);
 		}
 	}
 
 	// clean up macro implementation and parameters for deleted macros
 	tables_to_delete_from = {"ducklake_macro_impl", "ducklake_macro_parameters"};
 	for (auto &delete_tbl : tables_to_delete_from) {
-		auto result = Execute(StringUtil::Format(R"(
+		batch += StringUtil::Format(R"(
 DELETE FROM {METADATA_CATALOG}.%s tbl
 WHERE NOT EXISTS (
     SELECT 1 FROM {METADATA_CATALOG}.ducklake_macro m
     WHERE m.macro_id = tbl.macro_id
 );)",
-		                                         delete_tbl));
-		result->ThrowIfError("Failed to delete from " + delete_tbl + " in DuckLake: ");
+		                            delete_tbl);
 	}
 
 	auto &catalog = transaction.GetCatalog();
@@ -6046,14 +6037,15 @@ WHERE NOT EXISTS (
 			transaction.DeferNameMapCacheInvalidation(MappingIndex(row.GetValue<idx_t>(0)));
 		}
 
-		result = Execute(R"(
+		batch += R"(
 DELETE FROM {METADATA_CATALOG}.ducklake_name_mapping tbl
 WHERE NOT EXISTS (
     SELECT 1 FROM {METADATA_CATALOG}.ducklake_column_mapping m
     WHERE m.mapping_id = tbl.mapping_id
-);)");
-		result->ThrowIfError("Failed to delete from ducklake_name_mapping in DuckLake: ");
+);)";
 	}
+	execute_batch();
+
 
 	unordered_set<idx_t> expired_next_file_ids;
 	for (auto &snapshot : snapshots) {
