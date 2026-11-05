@@ -259,10 +259,8 @@ CALL disable_logging()
 statement ok
 CALL truncate_duckdb_logs()
 
-# catalogs without the Appender look up the path of every table that a commit writes to, once
 query II
-SELECT getvariable('insert_2_tables') > 0 AND getvariable('insert_12_tables') - getvariable('insert_2_tables') <= 10
-AND getvariable('insert_12_tables') > 0,
+SELECT getvariable('insert_2_tables') > 0 AND getvariable('insert_2_tables') = getvariable('insert_12_tables'),
 getvariable('ctas_2_tables') > 0 AND getvariable('ctas_2_tables') = getvariable('ctas_12_tables')
 ----
 true	true
