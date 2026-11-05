@@ -553,7 +553,8 @@ void PostgresMetadataManager::ClearCache() {
 }
 
 static string PostgresQuery(const string &remote_query) {
-	return StringUtil::Format("SELECT * FROM postgres_query({METADATA_CATALOG_NAME_LITERAL}, %s)",
+	// the query runs at bind, which saves the round trip that describes it
+	return StringUtil::Format("SELECT * FROM postgres_query({METADATA_CATALOG_NAME_LITERAL}, %s, execute_in_bind := true)",
 	                          SQLString(remote_query));
 }
 
