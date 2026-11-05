@@ -32,14 +32,6 @@ CREATE TABLE dl.{tbl} (i INTEGER, d DOUBLE, s VARCHAR, dt DATE, ts TIMESTAMP, de
 
 endloop
 
-# the first insert into each table writes its stats on the client
-foreach tbl client server
-
-statement ok
-INSERT INTO dl.{tbl} VALUES (5, 2.5, 'm', DATE '2026-01-05', TIMESTAMP '2026-01-05 10:00:00', 5.50, true)
-
-endloop
-
 statement ok
 CALL enable_logging('PostgresQueryLog', level = 'debug', storage = 'memory')
 
@@ -47,6 +39,10 @@ foreach tbl client server
 
 statement ok
 SET ducklake_postgres_pipeline_commit = '{tbl}' = 'server'
+
+# the first insert into a table creates its stats
+statement ok
+INSERT INTO dl.{tbl} VALUES (5, 2.5, 'm', DATE '2026-01-05', TIMESTAMP '2026-01-05 10:00:00', 5.50, true)
 
 # lower bounds, NULLs, a NaN (which leaves the bounds of the column unknown), upper bounds, the same bounds
 # again, and only NULLs
@@ -73,7 +69,7 @@ query I
 SELECT count(*) FROM duckdb_logs() WHERE type = 'PostgresQueryLog'
   AND parse_duckdb_log_message('PostgresQueryLog', message).query LIKE 'SELECT pg_advisory_xact_lock%'
 ----
-4
+5
 
 query I
 SELECT count(*) FROM (

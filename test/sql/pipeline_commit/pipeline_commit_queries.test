@@ -31,7 +31,7 @@ SET ducklake_postgres_pipeline_commit = true
 statement ok
 CREATE TABLE dl.t (i INTEGER, s VARCHAR)
 
-# the first insert creates the stats of the table, which the client-side commit writes
+# the first insert also creates the stats of the table
 statement ok
 INSERT INTO dl.t VALUES (1, 'b')
 
@@ -44,24 +44,26 @@ INSERT INTO dl.t VALUES (2, 'a'), (3, NULL)
 statement ok
 CALL disable_logging()
 
-# after the read of the latest snapshot, one pipeline commits, and no value of the data is in the statements
+# BEGIN goes with the read of the latest snapshot, then one pipeline commits, and no value of the data is in the
+# statements
 query II
-SELECT row_number() OVER () AS n, left(parse_duckdb_log_message('PostgresQueryLog', message).query, 70)
+SELECT row_number() OVER () AS n, left(replace(parse_duckdb_log_message('PostgresQueryLog', message).query, chr(10), ' '), 70)
 FROM duckdb_logs() WHERE type = 'PostgresQueryLog'
 ----
-1	BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED
-2	COPY (SELECT snapshot_id, schema_version, next_catalog_id, next_file_i
-3	SET LOCAL lock_timeout = '1s'
-4	SET LOCAL idle_in_transaction_session_timeout = '10s'
-5	SELECT pg_advisory_xact_lock(hashtext($1))
-6	INSERT INTO "pipeline_queries".ducklake_snapshot SELECT CASE WHEN EXIS
-7	INSERT INTO "pipeline_queries".ducklake_data_file SELECT s.next_file_i
-8	INSERT INTO "pipeline_queries".ducklake_file_column_stats SELECT s.nex
-9	UPDATE "pipeline_queries".ducklake_table_column_stats g SET contains_n
+1	BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED; SELECT snapshot_id, 
+2	SET LOCAL lock_timeout = '1s'
+3	SET LOCAL idle_in_transaction_session_timeout = '10s'
+4	SELECT pg_advisory_xact_lock(hashtext($1))
+5	INSERT INTO "pipeline_queries".ducklake_table_column_stats (table_id, 
+6	INSERT INTO "pipeline_queries".ducklake_table_stats (table_id, record_
+7	INSERT INTO "pipeline_queries".ducklake_snapshot SELECT CASE WHEN EXIS
+8	INSERT INTO "pipeline_queries".ducklake_data_file SELECT s.next_file_i
+9	INSERT INTO "pipeline_queries".ducklake_file_column_stats SELECT s.nex
 10	UPDATE "pipeline_queries".ducklake_table_column_stats g SET contains_n
-11	UPDATE "pipeline_queries".ducklake_table_stats ts SET record_count = t
-12	INSERT INTO "pipeline_queries".ducklake_snapshot_changes SELECT s.snap
-13	COMMIT
+11	UPDATE "pipeline_queries".ducklake_table_column_stats g SET contains_n
+12	UPDATE "pipeline_queries".ducklake_table_stats ts SET record_count = t
+13	INSERT INTO "pipeline_queries".ducklake_snapshot_changes SELECT s.snap
+14	COMMIT
 
 query II
 FROM dl.t ORDER BY i

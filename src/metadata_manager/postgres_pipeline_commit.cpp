@@ -393,6 +393,22 @@ vector<Value> PostgresMetadataManager::PipelineCommitStatements(DuckLakeSnapshot
 	auto conflicts = StringUtil::Format(
 	    "(^|,)((dropped_table|altered_table|deleted_from_table|inlined_delete):(%s)|dropped_schema:(%s))(,|$)",
 	    StringUtil::Join(involved_tables, "|"), StringUtil::Join(involved_schemas, "|"));
+	// the first insert into a table creates its stats, as empty ones that the updates below fill. Without the lock,
+	// two first inserts could both create them, so the client-side commit does
+	if (BooleanSetting(transaction, "ducklake_postgres_pipeline_lock")) {
+	statements.push_back(PipelineStatement(
+	    "INSERT INTO {METADATA_CATALOG}.ducklake_table_column_stats (table_id, column_id, contains_null, contains_nan) "
+	    "SELECT n.t, n.c, false, false FROM jsonb_to_recordset($1::JSONB) AS n(t BIGINT, c BIGINT) "
+	    "WHERE NOT EXISTS (SELECT 1 FROM {METADATA_CATALOG}.ducklake_table_stats ts WHERE ts.table_id = n.t) "
+	    "AND NOT EXISTS (SELECT 1 FROM {METADATA_CATALOG}.ducklake_table_column_stats g "
+	    "WHERE g.table_id = n.t AND g.column_id = n.c)",
+	    {guarded_columns.ToValue()}));
+	statements.push_back(PipelineStatement(
+	    "INSERT INTO {METADATA_CATALOG}.ducklake_table_stats (table_id, record_count, next_row_id, file_size_bytes) "
+	    "SELECT t.id::BIGINT, 0, 0, 0 FROM jsonb_array_elements_text($1::JSONB) AS t(id) "
+	    "WHERE NOT EXISTS (SELECT 1 FROM {METADATA_CATALOG}.ducklake_table_stats ts WHERE ts.table_id = t.id::BIGINT)",
+	    {tables.ToValue()}));
+	}
 	snapshot_statement = statements.size();
 	statements.push_back(PipelineStatement(
 	    "INSERT INTO {METADATA_CATALOG}.ducklake_snapshot "
