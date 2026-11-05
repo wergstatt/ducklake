@@ -455,26 +455,81 @@ string PostgresMetadataManager::ConfigOptionLockSql() const {
 	return "UPDATE {METADATA_CATALOG}.ducklake_metadata SET value = value WHERE key = 'version' AND scope IS NULL;\n";
 }
 
-unique_ptr<QueryResult> PostgresMetadataManager::Execute(DuckLakeSnapshot snapshot, string &query) {
-	SubstituteTransactionPlaceholders(snapshot, query);
+//! A value as the text that PostgreSQL reads for a parameter of its type
+static Value PostgresParameterText(const Value &value) {
+	if (value.IsNull()) {
+		return Value(LogicalType::VARCHAR);
+	}
+	switch (value.type().id()) {
+	case LogicalTypeId::LIST: {
+		vector<string> elements;
+		for (auto &element : ListValue::GetChildren(value)) {
+			if (element.IsNull()) {
+				elements.push_back("NULL");
+				continue;
+			}
+			auto text = StringValue::Get(PostgresParameterText(element));
+			text = StringUtil::Replace(StringUtil::Replace(text, "\\", "\\\\"), "\"", "\\\"");
+			elements.push_back("\"" + text + "\"");
+		}
+		return Value("{" + StringUtil::Join(elements, ",") + "}");
+	}
+	case LogicalTypeId::BLOB: {
+		auto &blob = StringValue::Get(value);
+		string hex = "\\x";
+		for (auto c : blob) {
+			hex += StringUtil::Format("%02x", static_cast<uint8_t>(c));
+		}
+		return Value(hex);
+	}
+	default:
+		return Value(value.ToString());
+	}
+}
+
+unique_ptr<QueryResult> PostgresMetadataManager::Execute(DuckLakeBatch &batch) {
+	if (duckdb_dialect) {
+		return DuckLakeMetadataManager::Execute(batch);
+	}
+	return ExecutePipeline(batch, false);
+}
+
+unique_ptr<QueryResult> PostgresMetadataManager::ExecutePipeline(DuckLakeBatch &batch, bool commit) {
 	auto &ducklake_catalog = transaction.GetCatalog();
-	SubstituteCatalogPlaceholders(query, SQLQuotedIdentifier::ToString(ducklake_catalog.MetadataSchemaName()));
-	if (query.find('\0') != string::npos) {
-		throw InvalidInputException("A DuckLake catalog on PostgreSQL cannot store text that contains a NUL byte, "
-		                            "such as a partition value, a name or a commit message");
+	auto schema_identifier = SQLQuotedIdentifier::ToString(ducklake_catalog.MetadataSchemaName());
+	// casts of float bounds to text keep their exact value
+	vector<Value> statements {Value::STRUCT(
+	    {{"query", Value("SET LOCAL extra_float_digits = 3")}, {"params", Value::LIST(LogicalType::VARCHAR, {})}})};
+	string reported_query;
+	for (auto &statement : batch.SplitStatements()) {
+		SubstituteCatalogPlaceholders(statement.sql, schema_identifier);
+		vector<Value> params;
+		for (auto &param : statement.params) {
+			params.push_back(PostgresParameterText(param));
+		}
+		auto has_nul = statement.sql.find('\0') != string::npos;
+		for (auto &param : params) {
+			has_nul = has_nul || (!param.IsNull() && StringValue::Get(param).find('\0') != string::npos);
+		}
+		if (has_nul) {
+			throw InvalidInputException("A DuckLake catalog on PostgreSQL cannot store text that contains a NUL byte, "
+			                            "such as a partition value, a name or a commit message");
+		}
+		reported_query += statement.sql + ";\n";
+		statements.push_back(Value::STRUCT({{"query", Value(std::move(statement.sql))},
+		                                    {"params", Value::LIST(LogicalType::VARCHAR, std::move(params))}}));
 	}
 	auto catalog_literal = SQLString::ToString(ducklake_catalog.MetadataDatabaseName().GetIdentifierName());
-	// casts of float bounds to text keep their exact value
-	query = "SET LOCAL extra_float_digits = 3;" + query;
-	return transaction.ExecuteRaw(
-	    StringUtil::Format("CALL postgres_execute(%s, %s, prepare=FALSE)", catalog_literal, SQLString(query)));
+	auto query = StringUtil::Format("FROM postgres_execute_pipeline(%s, ?%s)", catalog_literal,
+	                                commit ? ", commit := true" : "");
+	return transaction.ExecuteRaw(query, {Value::LIST(std::move(statements))}, reported_query);
 }
 
 unique_ptr<QueryResult> PostgresMetadataManager::ExecuteDropInTransaction(string &query) {
 	// DROP TABLE waits for every open transaction that read the table and the readers queued behind it fail, so it
 	// gives up instead and leaves the table to a later cleanup
-	auto batch = "CALL postgres_execute({METADATA_CATALOG_NAME_LITERAL}, 'SET LOCAL lock_timeout = 1');\n" + query;
-	return ExecuteInTransaction(batch);
+	DuckLakeBatch batch("SET LOCAL lock_timeout = 1;\n" + query);
+	return ExecutePipeline(batch, true);
 }
 
 void PostgresMetadataManager::ClearCache() {

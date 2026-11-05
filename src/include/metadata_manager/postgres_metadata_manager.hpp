@@ -46,7 +46,7 @@ public:
 	bool IsRetryableCommitError(const string &message) const override;
 	string ConfigOptionLockSql() const override;
 
-	unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, string &query) override;
+	unique_ptr<QueryResult> Execute(DuckLakeBatch &batch) override;
 	//! The expression that orders the bounds of a type on the server, empty if the server cannot merge them
 	string BoundOrderExpression(const string &bound, const LogicalType &type);
 	bool CanSkipSnapshotFetch(const TransactionChangeInformation &changes) const override;
@@ -77,6 +77,8 @@ protected:
 	string CastStatsToTarget(const string &stats, const LogicalType &type, StatsCastType cast_type) override;
 
 private:
+	//! Runs the statements of a batch in one pipeline, which commits the transaction if commit is set
+	unique_ptr<QueryResult> ExecutePipeline(DuckLakeBatch &batch, bool commit);
 	//! Whether a failed pipeline commit falls back to the client-side commit
 	bool RetriesOnClient(const string &message) const;
 	//! The statements of a commit of new data files that resolves its ids and stats on the server, empty if the

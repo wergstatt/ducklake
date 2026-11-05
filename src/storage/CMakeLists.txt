@@ -28,6 +28,7 @@ add_library(
   ducklake_sort_data.cpp
   ducklake_server_side_commit.cpp
   ducklake_staged_commit.cpp
+  ducklake_statement.cpp
   ducklake_stats.cpp
   ducklake_table_entry.cpp
   ducklake_initializer.cpp

@@ -53,10 +53,17 @@ unique_ptr<QueryResult> QuackMetadataManager::AttachMetadata(const string &attac
 	return std::move(result);
 }
 
-unique_ptr<QueryResult> QuackMetadataManager::Execute(DuckLakeSnapshot snapshot, string &query) {
+unique_ptr<QueryResult> QuackMetadataManager::Execute(DuckLakeSnapshot snapshot, DuckLakeBatch &batch) {
 	// the server commits each statement on its own, so the statements run in a server transaction
+	auto query = batch.WithLiterals().ToString();
 	SubstituteTransactionPlaceholders(snapshot, query);
 	return ExecuteInTransaction(query);
+}
+
+unique_ptr<QueryResult> QuackMetadataManager::Execute(DuckLakeBatch &batch) {
+	// the server binds no parameters
+	auto literal_batch = batch.WithLiterals();
+	return DuckLakeMetadataManager::Execute(literal_batch);
 }
 
 unique_ptr<QueryResult> QuackMetadataManager::ExecuteInTransaction(string &query) {

@@ -249,6 +249,7 @@ void DuckLakeInitializer::LoadExistingDuckLake(DuckLakeTransaction &transaction)
 	migrating = false;
 	// load the data path from the existing duck lake
 	auto &metadata_manager = transaction.GetMetadataManager();
+	metadata_manager.SetDuckDBDialect(false);
 	auto metadata = metadata_manager.LoadDuckLake();
 	DuckLakeVersion resolved_version = DuckLakeVersion::UNSET;
 	for (auto &tag : metadata.tags) {
@@ -272,6 +273,8 @@ void DuckLakeInitializer::LoadExistingDuckLake(DuckLakeTransaction &transaction)
 				catalog.VerifyWritable();
 			}
 			migrating = catalog_version < target_version;
+			// migrations are written in DuckDB's dialect
+			metadata_manager.SetDuckDBDialect(migrating);
 			if (catalog_version == DuckLakeVersion::V0_1) {
 				metadata_manager.MigrateV01();
 				catalog_version = DuckLakeVersion::V0_2;
@@ -298,6 +301,7 @@ void DuckLakeInitializer::LoadExistingDuckLake(DuckLakeTransaction &transaction)
 			}
 			if (catalog_version >= target_version) {
 				migrating = false;
+				metadata_manager.SetDuckDBDialect(false);
 				resolved_version = catalog_version;
 				continue;
 			}
@@ -310,6 +314,7 @@ void DuckLakeInitializer::LoadExistingDuckLake(DuckLakeTransaction &transaction)
 				catalog_version = DuckLakeVersion::V2_0_DEV1;
 			}
 			migrating = false;
+			metadata_manager.SetDuckDBDialect(false);
 			if (catalog_version != target_version) {
 				// LCOV_EXCL_START
 				throw NotImplementedException("Unsupported DuckLake version '%s'",

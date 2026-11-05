@@ -1680,7 +1680,7 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 	auto config_option_lock = ConfigOptionLockSql();
 	context.locks_config_options = !config_option_lock.empty();
 	bool option_lock_failed = false;
-	context.execute_commit_batch = [&](DuckLakeSnapshot snapshot, string &query) {
+	context.execute_commit_batch = [&](DuckLakeSnapshot snapshot, DuckLakeBatch &query) {
 		option_lock_failed = false;
 		unique_ptr<QueryResult> result;
 		if (!query.empty()) {
@@ -2360,12 +2360,18 @@ unique_ptr<QueryResult> DuckLakeTransaction::ExecuteRaw(string query) {
 }
 
 unique_ptr<QueryResult> DuckLakeTransaction::ExecuteRaw(string query, vector<Value> parameters) {
+	auto reported_query = query;
+	return ExecuteRaw(std::move(query), std::move(parameters), reported_query);
+}
+
+unique_ptr<QueryResult> DuckLakeTransaction::ExecuteRaw(string query, vector<Value> parameters,
+                                                        const string &reported_query) {
 	auto &connection = GetConnection();
 	auto start = std::chrono::steady_clock::now();
 	auto prepared = connection.Prepare(query);
 	auto result =
 	    prepared->HasError() ? make_uniq<QueryResult>(prepared->GetErrorObject()) : prepared->Execute(parameters);
-	ReportMetadataQuery(query, std::chrono::steady_clock::now() - start);
+	ReportMetadataQuery(reported_query, std::chrono::steady_clock::now() - start);
 	return result;
 }
 

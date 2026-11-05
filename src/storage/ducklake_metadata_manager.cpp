@@ -3261,12 +3261,39 @@ void DuckLakeMetadataManager::SubstituteTransactionPlaceholders(DuckLakeSnapshot
 	query = DuckLakeUtil::ReplacePlaceholders(query, replacements);
 }
 
+unique_ptr<QueryResult> DuckLakeMetadataManager::Execute(DuckLakeSnapshot snapshot, DuckLakeBatch &batch) {
+	batch.TransformSql([&](string &sql) { SubstituteTransactionPlaceholders(snapshot, sql); });
+	return Execute(batch);
+}
+
+unique_ptr<QueryResult> DuckLakeMetadataManager::Execute(DuckLakeBatch &batch) {
+	if (batch.empty()) {
+		string empty;
+		return Query(empty);
+	}
+	unique_ptr<QueryResult> result;
+	for (auto &statement : batch.Statements()) {
+		if (statement.params.empty()) {
+			result = Query(statement.sql);
+		} else {
+			SubstituteCatalogPlaceholders(statement.sql);
+			result = transaction.ExecuteRaw(statement.sql, statement.params);
+		}
+		if (result->HasError()) {
+			break;
+		}
+	}
+	return result;
+}
+
 unique_ptr<QueryResult> DuckLakeMetadataManager::Execute(DuckLakeSnapshot snapshot, string &query) {
-	return Query(snapshot, query);
+	DuckLakeBatch batch(query);
+	return Execute(snapshot, batch);
 }
 
 unique_ptr<QueryResult> DuckLakeMetadataManager::Execute(string &query) {
-	return Query(query);
+	DuckLakeBatch batch(query);
+	return Execute(batch);
 }
 
 unique_ptr<QueryResult> DuckLakeMetadataManager::ExecuteDropInTransaction(string &query) {

@@ -21,6 +21,7 @@
 #include "storage/ducklake_stats.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "storage/ducklake_metadata_info.hpp"
+#include "storage/ducklake_statement.hpp"
 #include "common/ducklake_encryption.hpp"
 #include "common/ducklake_options.hpp"
 #include "common/index.hpp"
@@ -305,8 +306,17 @@ public:
 	virtual string GetVersionString();
 	virtual DuckLakeMetadata LoadDuckLake();
 
-	virtual unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, string &query);
-	virtual unique_ptr<QueryResult> Execute(string &query);
+	//! Runs the statements of a batch, after substituting the placeholders of the commit snapshot
+	virtual unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, DuckLakeBatch &batch);
+	//! Runs the statements of a batch
+	virtual unique_ptr<QueryResult> Execute(DuckLakeBatch &batch);
+	//! Whether statements are in DuckDB's dialect, such as those of migrations, so that a catalog that runs
+	//! statements natively runs them through DuckDB instead
+	void SetDuckDBDialect(bool duckdb_dialect_p) {
+		duckdb_dialect = duckdb_dialect_p;
+	}
+	unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, string &query);
+	unique_ptr<QueryResult> Execute(string &query);
 	//! Runs the statements in a transaction of their own, rolled back when one of them fails
 	virtual unique_ptr<QueryResult> ExecuteInTransaction(string &query);
 	//! Runs statements that drop metadata tables atomically, failing where the drop would wait for their readers
@@ -323,6 +333,7 @@ public:
 	unique_ptr<QueryResult> Query(string &&query);
 
 protected:
+	bool duckdb_dialect = false;
 	void SubstituteCatalogPlaceholders(string &query) const;
 	void SubstituteCatalogPlaceholders(string &query, const string &metadata_catalog) const;
 	void SubstituteTransactionPlaceholders(DuckLakeSnapshot snapshot, string &query) const;

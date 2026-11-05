@@ -209,6 +209,8 @@ public:
 	unique_ptr<QueryResult> ExecuteRaw(string query);
 	//! As above, with values for the parameters of the query, which the log leaves out
 	unique_ptr<QueryResult> ExecuteRaw(string query, vector<Value> parameters);
+	//! As above, logged as reported_query, such as the statements that the query sends on
+	unique_ptr<QueryResult> ExecuteRaw(string query, vector<Value> parameters, const string &reported_query);
 	//! Rolls back the metadata transaction of a failed commit and begins a new one, keeping the snapshot
 	void RestartMetadataTransaction();
 	//! Whether the transaction changed config options

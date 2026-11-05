@@ -46,7 +46,7 @@ struct DuckLakeCommitContext {
 	std::function<void(idx_t)> set_delete_commit_snapshot = [](idx_t) {
 	};
 	//! Executes the batched snapshot/changes SQL against the metadata DB.
-	std::function<unique_ptr<QueryResult>(DuckLakeSnapshot, string &)> execute_commit_batch;
+	std::function<unique_ptr<QueryResult>(DuckLakeSnapshot, DuckLakeBatch &)> execute_commit_batch;
 	//! Classifies metadata-catalog errors that are safe to retry.
 	std::function<bool(const string &)> is_retryable_metadata_error = [](const string &) {
 		return false;
@@ -213,9 +213,10 @@ public:
 	string WriteSnapshotChanges(DuckLakeCommitState &commit_state, TransactionChangeInformation &changes,
 	                            const DuckLakeSnapshotCommit &commit_info) const;
 
-	string CommitChanges(DuckLakeCommitState &commit_state, TransactionChangeInformation &transaction_changes,
-	                     optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats, const DuckLakeCommitContext &context,
-	                     map<TableIndex, DroppedDataFileStats> &attempt_dropped_file_stats);
+	DuckLakeBatch CommitChanges(DuckLakeCommitState &commit_state, TransactionChangeInformation &transaction_changes,
+	                            optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats,
+	                            const DuckLakeCommitContext &context,
+	                            map<TableIndex, DroppedDataFileStats> &attempt_dropped_file_stats);
 
 	vector<DuckLakeSchemaInfo> GetNewSchemas(DuckLakeCommitState &commit_state);
 	NewTableInfo GetNewTables(DuckLakeCommitState &commit_state, TransactionChangeInformation &transaction_changes);
@@ -226,7 +227,7 @@ public:
 	                    reference<CatalogEntry> view_entry, NewTableInfo &result,
 	                    TransactionChangeInformation &transaction_changes);
 	NewMacroInfo GetNewMacros(DuckLakeCommitState &commit_state, TransactionChangeInformation &transaction_changes);
-	NewDataInfo GetNewDataFiles(string &batch_query, DuckLakeCommitState &commit_state,
+	NewDataInfo GetNewDataFiles(DuckLakeBatch &batch_query, DuckLakeCommitState &commit_state,
 	                            optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats,
 	                            const DuckLakeCommitContext &context,
 	                            map<TableIndex, DroppedDataFileStats> &attempt_dropped_file_stats);
@@ -255,7 +256,7 @@ public:
 	//! (+ committed inlined data) and append the UpdateGlobalTableStats SQL to `batch_query`. No-op (leaving the
 	//! existing stale stats, and the scan fallback) if the table is not fully delete-free post-rewrite or the
 	//! inlined data cannot be accounted for exactly. Returns whether it wrote the stats.
-	bool RecomputeGlobalStatsAfterRewrite(string &batch_query, TableIndex table_id, DuckLakeSnapshot snapshot,
+	bool RecomputeGlobalStatsAfterRewrite(DuckLakeBatch &batch_query, TableIndex table_id, DuckLakeSnapshot snapshot,
 	                                      const CompactionInformation &rewrite_changes,
 	                                      const set<DataFileIndex> &removed_source_ids,
 	                                      const DuckLakeCommitContext &context);
