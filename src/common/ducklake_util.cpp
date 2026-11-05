@@ -625,6 +625,11 @@ void DuckLakeUtil::CopyExtensionSettings(ClientContext &from, ClientContext &to)
 			to.config.user_settings.SetUserSetting(setting_index, option.default_value);
 			continue;
 		}
+		if (StringUtil::CIEquals(entry.first.GetIdentifierName(), "pg_execute_in_bind")) {
+			// the metadata reads run at bind, which saves the round trip that describes them
+			to.config.user_settings.SetUserSetting(setting_index, Value::BOOLEAN(true));
+			continue;
+		}
 		if (!from.config.user_settings.IsSet(setting_index)) {
 			continue;
 		}
