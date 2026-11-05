@@ -1,0 +1,115 @@
+# name: test/sql/pipeline_commit/pipeline_commit_inlined.test
+# description: the inlined rows of a pipeline commit and their stats equal those of the client-side commit
+# group: [pipeline_commit]
+
+require ducklake
+
+require parquet
+
+require postgres_scanner
+
+require-env DUCKLAKE_CI
+
+require-env DUCKLAKE_CONNECTION postgres:dbname=ducklakedb
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH '{DUCKLAKE_CONNECTION}' AS pg
+
+statement ok
+CALL postgres_execute('pg', 'DROP SCHEMA IF EXISTS pipeline_inlined CASCADE')
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/pipeline_inlined',
+  METADATA_SCHEMA 'pipeline_inlined', DATA_INLINING_ROW_LIMIT 10,
+  METADATA_PARAMETERS MAP {'isolation_level': 'read committed'})
+
+foreach tbl client server
+
+statement ok
+CREATE TABLE dl.{tbl} (i INTEGER, d DOUBLE, s VARCHAR, bl BLOB, dt DATE, ts TIMESTAMP, dec DECIMAL(10, 2), b BOOLEAN,
+  u UUID, h HUGEINT)
+
+# the first insert creates the inlined-data table on the client
+statement ok
+INSERT INTO dl.{tbl} VALUES (5, 2.5, 'm', 'm'::BLOB, DATE '2026-01-05', TIMESTAMP '2026-01-05 10:00:00', 5.50, true,
+  '00000000-0000-0000-0000-000000000005', 5)
+
+endloop
+
+statement ok
+CALL enable_logging('PostgresQueryLog', level = 'debug', storage = 'memory')
+
+foreach tbl client server
+
+statement ok
+SET ducklake_postgres_pipeline_commit = '{tbl}' = 'server'
+
+# a quoted string, a string with a NUL byte that is neither bound, special bytes, and only NULLs
+statement ok
+INSERT INTO dl.{tbl} VALUES (1, -1.0, 'it''s, "quoted"', '\x00\xFF'::BLOB, DATE '2025-12-31',
+  TIMESTAMP '2026-01-01 00:00:00', 1.25, false, '00000000-0000-0000-0000-000000000001', -1),
+  (2, 3.5, 'nul' || chr(0) || 'byte', 'b'::BLOB, DATE '2026-02-01', TIMESTAMP '2026-02-01 00:00:00', 2.00, true,
+  '00000000-0000-0000-0000-000000000002', 2),
+  (3, 4.5, 'zz', 'c'::BLOB, DATE '2026-03-01', TIMESTAMP '2026-03-01 00:00:00', 3.00, true,
+  '00000000-0000-0000-0000-000000000003', 3),
+  (NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+
+statement ok
+INSERT INTO dl.{tbl} VALUES (9, 'nan'::DOUBLE, 'zzz', ''::BLOB, DATE '2027-01-01',
+  TIMESTAMP '2027-01-01 00:00:00', 99.99, true, 'ffffffff-ffff-ffff-ffff-ffffffffffff',
+  170141183460469231731687303715884105727)
+
+endloop
+
+statement ok
+CALL disable_logging()
+
+# the inserts into the server table took the pipeline
+query I
+SELECT count(*) FROM duckdb_logs() WHERE type = 'PostgresQueryLog'
+  AND parse_duckdb_log_message('PostgresQueryLog', message).query LIKE 'SELECT pg_advisory_xact_lock%'
+----
+2
+
+query I
+SELECT count(*) FROM (
+  (SELECT rowid, * FROM dl.client EXCEPT SELECT rowid, * FROM dl.server)
+  UNION ALL
+  (SELECT rowid, * FROM dl.server EXCEPT SELECT rowid, * FROM dl.client)
+)
+----
+0
+
+query I
+SELECT count(*) FROM dl.server
+----
+6
+
+query I
+SELECT count(*) FROM (
+  (SELECT * EXCLUDE (table_id) FROM postgres_query('pg', 'SELECT c.* FROM pipeline_inlined.ducklake_table_column_stats c
+     JOIN pipeline_inlined.ducklake_table t USING (table_id) WHERE t.table_name = ''client'''))
+  EXCEPT
+  (SELECT * EXCLUDE (table_id) FROM postgres_query('pg', 'SELECT c.* FROM pipeline_inlined.ducklake_table_column_stats c
+     JOIN pipeline_inlined.ducklake_table t USING (table_id) WHERE t.table_name = ''server'''))
+)
+----
+0
+
+query I
+SELECT count(*) FROM (
+  (SELECT * EXCLUDE (table_id) FROM postgres_query('pg', 'SELECT s.* FROM pipeline_inlined.ducklake_table_stats s
+     JOIN pipeline_inlined.ducklake_table t USING (table_id) WHERE t.table_name = ''client'''))
+  EXCEPT
+  (SELECT * EXCLUDE (table_id) FROM postgres_query('pg', 'SELECT s.* FROM pipeline_inlined.ducklake_table_stats s
+     JOIN pipeline_inlined.ducklake_table t USING (table_id) WHERE t.table_name = ''server'''))
+)
+----
+0
+
+query I
+SELECT s = 'nul' || chr(0) || 'byte' FROM dl.server WHERE i = 2
+----
+true

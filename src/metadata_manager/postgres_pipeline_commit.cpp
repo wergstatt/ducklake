@@ -93,17 +93,79 @@ string PostgresMetadataManager::BoundOrderExpression(const string &bound, const 
 	if (RequiresValueComparison(type)) {
 		return CastStatsToTarget(bound, type, StatsCastType::ORDERING);
 	}
-	if (type.id() == LogicalTypeId::VARCHAR || type.id() == LogicalTypeId::UUID) {
-		// the client compares these as bytes
-		return DuckLakeUtil::WithBinaryCollation(bound);
-	}
-	return string();
+	// the client compares the bounds of other types as bytes
+	return DuckLakeUtil::WithBinaryCollation(bound);
 }
 
 //! The stats of new values that the server can merge
 static bool HasBoundsWithoutNul(const DuckLakeColumnStats &stats) {
 	return (!stats.has_min || stats.min.find('\0') == string::npos) &&
 	       (!stats.has_max || stats.max.find('\0') == string::npos);
+}
+
+//! How an inlined value is sent: as its text, which Postgres casts to the column type, or as hex bytes for BYTEA
+enum class InlinedValueEncoding { UNSUPPORTED, TEXT, HEX };
+
+static InlinedValueEncoding GetInlinedValueEncoding(const LogicalType &type) {
+	switch (type.id()) {
+	case LogicalTypeId::BOOLEAN:
+	case LogicalTypeId::TINYINT:
+	case LogicalTypeId::SMALLINT:
+	case LogicalTypeId::INTEGER:
+	case LogicalTypeId::BIGINT:
+	case LogicalTypeId::UTINYINT:
+	case LogicalTypeId::USMALLINT:
+	case LogicalTypeId::UINTEGER:
+	case LogicalTypeId::UBIGINT:
+	case LogicalTypeId::HUGEINT:
+	case LogicalTypeId::UHUGEINT:
+	case LogicalTypeId::FLOAT:
+	case LogicalTypeId::DOUBLE:
+	case LogicalTypeId::DECIMAL:
+	case LogicalTypeId::DATE:
+	case LogicalTypeId::TIME:
+	case LogicalTypeId::TIMESTAMP:
+	case LogicalTypeId::INTERVAL:
+	case LogicalTypeId::UUID:
+		return InlinedValueEncoding::TEXT;
+	case LogicalTypeId::VARCHAR:
+	case LogicalTypeId::BLOB:
+		// stored as BYTEA, which keeps the NUL bytes of a string
+		return InlinedValueEncoding::HEX;
+	default:
+		return InlinedValueEncoding::UNSUPPORTED;
+	}
+}
+
+static string ToHex(const string &bytes) {
+	static constexpr const char *DIGITS = "0123456789abcdef";
+	string result;
+	result.reserve(bytes.size() * 2);
+	for (auto byte : bytes) {
+		result += DIGITS[static_cast<uint8_t>(byte) >> 4];
+		result += DIGITS[static_cast<uint8_t>(byte) & 0x0F];
+	}
+	return result;
+}
+
+//! The inlined-data table that new rows of the table go to, empty if the commit has to create one
+static Identifier CurrentInlinedTable(const DuckLakeTableEntry &table, const DuckLakeTableSchemaVersions &versions) {
+	Identifier result;
+	optional_idx latest;
+	for (auto &inlined_table : table.GetInlinedDataTables()) {
+		if (DuckLakeTableEntry::IsCurrentInlinedDataTable(inlined_table.schema_version, versions.last_change) &&
+		    (!latest.IsValid() || inlined_table.schema_version > latest.GetIndex())) {
+			latest = inlined_table.schema_version;
+			result = inlined_table.table_name;
+		}
+	}
+	return result;
+}
+
+//! Whether the server can merge the stats of the new values of a column
+static bool ServerCanMerge(PostgresMetadataManager &manager, const DuckLakeColumnStats &stats) {
+	return !stats.extra_stats && !stats.bounds_unknown && HasBoundsWithoutNul(stats) &&
+	       !manager.BoundOrderExpression("x", stats.type).empty();
 }
 
 vector<Value> PostgresMetadataManager::PipelineCommitStatements(DuckLakeSnapshot transaction_snapshot,
@@ -113,10 +175,9 @@ vector<Value> PostgresMetadataManager::PipelineCommitStatements(DuckLakeSnapshot
 	if (transaction_snapshot.snapshot_id == DConstants::INVALID_INDEX || !catalog.SupportsV1_1Metadata() ||
 	    !IsDataOnlyCommit(changes) || RequiresClientSideCommit(transaction) || transaction.ChangesConfigOptions() ||
 	    !changes.tables_deleted_from.empty() || !changes.tables_deleted_inlined.empty() ||
-	    !changes.tables_inserted_inlined.empty() || !changes.tables_flushed_inlined.empty() ||
-	    !changes.tables_merge_adjacent.empty() || !changes.tables_rewrite_delete.empty() ||
-	    !changes.expired_snapshots.empty() || !transaction.GetDroppedFiles().empty() ||
-	    !transaction.GetNewNameMaps().name_maps.empty()) {
+	    !changes.tables_flushed_inlined.empty() || !changes.tables_merge_adjacent.empty() ||
+	    !changes.tables_rewrite_delete.empty() || !changes.expired_snapshots.empty() ||
+	    !transaction.GetDroppedFiles().empty() || !transaction.GetNewNameMaps().name_maps.empty()) {
 		return {};
 	}
 	PipelineRows files, file_stats, partition_values, table_stats, tables;
@@ -124,17 +185,17 @@ vector<Value> PostgresMetadataManager::PipelineCommitStatements(DuckLakeSnapshot
 	map<string, pair<LogicalType, unique_ptr<PipelineRows>>> column_stats;
 	PipelineRows guarded_columns;
 	vector<string> involved_tables, involved_schemas;
+	vector<pair<string, vector<Value>>> inlined_inserts;
 	idx_t file_offset = 0;
 	for (auto &entry : transaction.GetLocalChanges().Changes()) {
 		auto table_id = entry.first;
 		auto &table_changes = entry.second;
 		if (IsTransactionLocal(table_id) || !table_changes.new_delete_files.empty() ||
 		    !table_changes.new_inlined_data_deletes.empty() || table_changes.new_inlined_file_deletes ||
-		    !table_changes.compactions.empty() || !table_changes.compacted_files.empty() ||
-		    table_changes.new_inlined_data) {
+		    !table_changes.compactions.empty() || !table_changes.compacted_files.empty()) {
 			return {};
 		}
-		if (table_changes.new_data_files.empty()) {
+		if (table_changes.new_data_files.empty() && !table_changes.new_inlined_data) {
 			continue;
 		}
 		auto table_entry = catalog.GetEntryById(transaction, transaction_snapshot, table_id);
@@ -156,8 +217,7 @@ vector<Value> PostgresMetadataManager::PipelineCommitStatements(DuckLakeSnapshot
 				return {};
 			}
 			for (auto &stats : file.column_stats) {
-				if (stats.second.extra_stats || stats.second.bounds_unknown || !HasBoundsWithoutNul(stats.second) ||
-				    BoundOrderExpression("x", stats.second.type).empty()) {
+				if (!ServerCanMerge(*this, stats.second)) {
 					return {};
 				}
 			}
@@ -213,6 +273,70 @@ vector<Value> PostgresMetadataManager::PipelineCommitStatements(DuckLakeSnapshot
 			row_offset += file.row_count;
 			file_offset++;
 		}
+		if (table_changes.new_inlined_data) {
+			auto &inlined = *table_changes.new_inlined_data;
+			auto inlined_table = CurrentInlinedTable(table, catalog.GetTableSchemaVersions(transaction, table_id));
+			auto columns = table.GetTableColumns();
+			if (inlined.HasPreservedRowIds() || !inlined.data || inlined_table.empty() ||
+			    inlined.data->ColumnCount() != columns.size()) {
+				return {};
+			}
+			for (auto &stats : inlined.column_stats) {
+				if (!ServerCanMerge(*this, stats.second)) {
+					return {};
+				}
+			}
+			auto &types = inlined.data->Types();
+			vector<string> values;
+			for (idx_t c = 0; c < columns.size(); c++) {
+				auto encoding = GetInlinedValueEncoding(types[c]);
+				if (encoding == InlinedValueEncoding::UNSUPPORTED) {
+					return {};
+				}
+				auto element = StringUtil::Format("e->>%d", c + 1);
+				values.push_back(encoding == InlinedValueEncoding::HEX
+				                     ? "decode(" + element + ", 'hex')"
+				                     : StringUtil::Format("CAST(%s AS %s)", element, GetColumnType(columns[c])));
+			}
+			// one array per row: its position, then its values
+			PipelineRows rows;
+			idx_t position = 0;
+			for (auto &chunk : inlined.data->Chunks()) {
+				for (idx_t r = 0; r < chunk.size(); r++) {
+					auto row = rows.json.CreateArray();
+					row.Append(rows.json.CreateUnsignedInteger(position++));
+					for (idx_t c = 0; c < chunk.ColumnCount(); c++) {
+						auto value = chunk.GetValue(c, r);
+						if (value.IsNull()) {
+							row.Append(rows.json.CreateNull());
+						} else if (GetInlinedValueEncoding(types[c]) == InlinedValueEncoding::HEX) {
+							row.AppendString(ToHex(StringValue::Get(value)));
+						} else {
+							row.AppendString(value.ToString());
+						}
+					}
+					rows.rows.Append(row);
+				}
+			}
+			inlined_inserts.emplace_back(
+			    StringUtil::Format("INSERT INTO {METADATA_CATALOG}.%s "
+			                       "SELECT ts.next_row_id + $2::BIGINT + (e->>0)::BIGINT, s.snapshot_id, NULL, %s "
+			                       "FROM jsonb_array_elements($1::JSONB) AS e "
+			                       "JOIN {METADATA_CATALOG}.ducklake_table_stats ts ON ts.table_id = $3::BIGINT "
+			                       "CROSS JOIN %s s",
+			                       SQLIdentifier::ToString(inlined_table), StringUtil::Join(values, ", "),
+			                       LATEST_SNAPSHOT),
+			    vector<Value> {rows.ToValue(), Value(to_string(row_offset)), Value(to_string(table_id.index))});
+			for (auto &stats : inlined.column_stats) {
+				added.MergeStats(stats.first, stats.second);
+			}
+			added.record_count += inlined.Count();
+			added.next_row_id += inlined.Count();
+			if (table_changes.new_data_files.empty()) {
+				// a commit of only inlined rows takes a file id, as the client-side commit does
+				file_offset++;
+			}
+		}
 		auto stats_row = table_stats.NewRow();
 		stats_row.Add("t", table_stats.json.CreateUnsignedInteger(table_id.index));
 		stats_row.Add("rows", table_stats.json.CreateUnsignedInteger(added.record_count));
@@ -249,7 +373,7 @@ vector<Value> PostgresMetadataManager::PipelineCommitStatements(DuckLakeSnapshot
 			guarded_columns.rows.Append(guarded);
 		}
 	}
-	if (files.count == 0) {
+	if (involved_tables.empty()) {
 		return {};
 	}
 	auto file_count = Value(to_string(file_offset));
@@ -285,25 +409,29 @@ vector<Value> PostgresMetadataManager::PipelineCommitStatements(DuckLakeSnapshot
 	    "FROM {METADATA_CATALOG}.ducklake_snapshot s ORDER BY s.snapshot_id DESC LIMIT 1 RETURNING snapshot_id",
 	    {Value(to_string(transaction_snapshot.snapshot_id)), Value(conflicts), tables.ToValue(),
 	     guarded_columns.ToValue(), file_count}));
-	statements.push_back(PipelineStatement(
-	    StringUtil::Format(
-	        "INSERT INTO {METADATA_CATALOG}.ducklake_data_file "
-	        "SELECT s.next_file_id - $2::BIGINT + f.k, f.t, s.snapshot_id, NULL, NULL, f.path, f.rel, 'parquet', "
-	        "f.rows, f.bytes, f.footer, ts.next_row_id + f.row_offset, f.part, f.key, NULL, NULL, f.rgc "
-	        "FROM jsonb_to_recordset($1::JSONB) AS f(k BIGINT, t BIGINT, path VARCHAR, rel BOOLEAN, rows BIGINT, bytes "
-	        "BIGINT, footer BIGINT, row_offset BIGINT, part BIGINT, key VARCHAR, rgc BIGINT) "
-	        "JOIN {METADATA_CATALOG}.ducklake_table_stats ts ON ts.table_id = f.t CROSS JOIN %s s",
-	        LATEST_SNAPSHOT),
-	    {files.ToValue(), file_count}));
-	statements.push_back(PipelineStatement(
-	    StringUtil::Format("INSERT INTO {METADATA_CATALOG}.ducklake_file_column_stats "
-	                       "SELECT s.next_file_id - $2::BIGINT + c.k, c.t, c.c, c.size, c.vals, c.nulls, c.min_value, "
-	                       "c.max_value, c.nan, NULL, c.min_exact, c.max_exact "
-	                       "FROM jsonb_to_recordset($1::JSONB) AS c(k BIGINT, t BIGINT, c BIGINT, size BIGINT, vals "
-	                       "BIGINT, nulls BIGINT, min_value VARCHAR, max_value VARCHAR, nan BOOLEAN, min_exact "
-	                       "BOOLEAN, max_exact BOOLEAN) CROSS JOIN %s s",
-	                       LATEST_SNAPSHOT),
-	    {file_stats.ToValue(), file_count}));
+	if (files.count > 0) {
+		statements.push_back(PipelineStatement(
+		    StringUtil::Format(
+		        "INSERT INTO {METADATA_CATALOG}.ducklake_data_file "
+		        "SELECT s.next_file_id - $2::BIGINT + f.k, f.t, s.snapshot_id, NULL, NULL, f.path, f.rel, 'parquet', "
+		        "f.rows, f.bytes, f.footer, ts.next_row_id + f.row_offset, f.part, f.key, NULL, NULL, f.rgc "
+		        "FROM jsonb_to_recordset($1::JSONB) AS f(k BIGINT, t BIGINT, path VARCHAR, rel BOOLEAN, rows BIGINT, "
+		        "bytes "
+		        "BIGINT, footer BIGINT, row_offset BIGINT, part BIGINT, key VARCHAR, rgc BIGINT) "
+		        "JOIN {METADATA_CATALOG}.ducklake_table_stats ts ON ts.table_id = f.t CROSS JOIN %s s",
+		        LATEST_SNAPSHOT),
+		    {files.ToValue(), file_count}));
+		statements.push_back(PipelineStatement(
+		    StringUtil::Format(
+		        "INSERT INTO {METADATA_CATALOG}.ducklake_file_column_stats "
+		        "SELECT s.next_file_id - $2::BIGINT + c.k, c.t, c.c, c.size, c.vals, c.nulls, c.min_value, "
+		        "c.max_value, c.nan, NULL, c.min_exact, c.max_exact "
+		        "FROM jsonb_to_recordset($1::JSONB) AS c(k BIGINT, t BIGINT, c BIGINT, size BIGINT, vals "
+		        "BIGINT, nulls BIGINT, min_value VARCHAR, max_value VARCHAR, nan BOOLEAN, min_exact "
+		        "BOOLEAN, max_exact BOOLEAN) CROSS JOIN %s s",
+		        LATEST_SNAPSHOT),
+		    {file_stats.ToValue(), file_count}));
+	}
 	if (partition_values.count > 0) {
 		statements.push_back(PipelineStatement(
 		    StringUtil::Format("INSERT INTO {METADATA_CATALOG}.ducklake_file_partition_value "
@@ -312,6 +440,9 @@ vector<Value> PostgresMetadataManager::PipelineCommitStatements(DuckLakeSnapshot
 		                       "CROSS JOIN %s s",
 		                       LATEST_SNAPSHOT),
 		    {partition_values.ToValue(), file_count}));
+	}
+	for (auto &insert : inlined_inserts) {
+		statements.push_back(PipelineStatement(insert.first, std::move(insert.second)));
 	}
 	for (auto &group : column_stats) {
 		auto &type = group.second.first;
@@ -345,6 +476,9 @@ vector<Value> PostgresMetadataManager::PipelineCommitStatements(DuckLakeSnapshot
 	vector<string> changes_made;
 	for (auto &table_id : changes.tables_inserted_into) {
 		changes_made.push_back("inserted_into_table:" + to_string(table_id.index));
+	}
+	for (auto &table_id : changes.tables_inserted_inlined) {
+		changes_made.push_back("inlined_insert:" + to_string(table_id.index));
 	}
 	auto &commit_info = transaction.GetCommitInfo();
 	statements.push_back(PipelineStatement(
