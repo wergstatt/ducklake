@@ -514,6 +514,7 @@
         "test/sql/general/long_name_paths.test",
         "test/sql/general/null_schema_and_table_paths_commit.test",
         "test/sql/list_files/list_files_without_footer_size.test",
+        "test/sql/metadata/commit_table_paths_from_catalog.test",
         "test/sql/metadata/data_file_without_row_id_start.test",
         "test/sql/metadata/default_order.test",
         "test/sql/migration/inlined_column_rename_remigrate.test",

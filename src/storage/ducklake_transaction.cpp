@@ -1822,6 +1822,10 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 		}
 		return entry->Cast<DuckLakeTableEntry>();
 	};
+	context.get_catalog_table_path = [&](TableIndex table_id) {
+		auto table = get_table_entry(table_id);
+		return table ? table->DataPath() : string();
+	};
 	context.get_table_column_schema = [&](TableIndex table_id) {
 		// The full flattened schema at the commit snapshot: top-level roots (is_root=true) plus every nested
 		// struct/list/map/array leaf (is_root=false). Roots carry the inlined-data merge (TryMergeInlinedStats

@@ -2406,8 +2406,11 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
 	auto get_table_path = [&](TableIndex table_id) -> const string & {
 		auto entry = table_paths.find(table_id.index);
 		if (entry == table_paths.end()) {
-			auto path = DuckLakeMetadataManager::GetPathForTable(table_id, new_tables_result, context.query_metadata,
-			                                                     data_path, separator);
+			auto path = context.get_catalog_table_path(table_id);
+			if (path.empty()) {
+				path = DuckLakeMetadataManager::GetPathForTable(table_id, new_tables_result, context.query_metadata,
+				                                                data_path, separator);
+			}
 			entry = table_paths.emplace(table_id.index, std::move(path)).first;
 		}
 		return entry->second;

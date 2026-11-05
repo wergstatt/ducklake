@@ -1,0 +1,152 @@
+# name: test/sql/metadata/commit_table_paths_from_catalog.test
+# description: the data files of tables in one commit land in the directory of their table, whichever path it has
+# group: [metadata]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake
+(DATA_PATH '{DATA_PATH}/commit_table_paths_from_catalog', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE ducklake.plain (i INTEGER)
+
+statement ok
+CREATE TABLE ducklake.custom (i INTEGER)
+
+statement ok
+CREATE TABLE ducklake.renamed (i INTEGER)
+
+statement ok
+CREATE SCHEMA ducklake.s1
+
+statement ok
+CREATE TABLE ducklake.s1.in_schema (i INTEGER)
+
+# a table with a path of its own, and a schema with an absolute path
+statement ok
+UPDATE __ducklake_metadata_ducklake.ducklake_table SET path = 'custom_dir/', path_is_relative = true
+WHERE table_name = 'custom'
+
+statement ok
+UPDATE __ducklake_metadata_ducklake.ducklake_schema
+SET path = '{DATA_PATH}/commit_table_paths_from_catalog_abs/', path_is_relative = false
+WHERE schema_name = 's1'
+
+statement ok
+UPDATE __ducklake_metadata_ducklake.ducklake_table SET path = 'in_schema_dir/', path_is_relative = true
+WHERE table_name = 'in_schema'
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake
+(DATA_PATH '{DATA_PATH}/commit_table_paths_from_catalog', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CALL enable_logging('DuckLakeMetadata')
+
+# one commit writes to the tables with paths of their own, to a renamed table and to new tables
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO ducklake.plain VALUES (1)
+
+statement ok
+INSERT INTO ducklake.custom VALUES (2)
+
+statement ok
+INSERT INTO ducklake.custom VALUES (3)
+
+statement ok
+INSERT INTO ducklake.s1.in_schema VALUES (4)
+
+statement ok
+ALTER TABLE ducklake.renamed RENAME TO renamed_to
+
+statement ok
+INSERT INTO ducklake.renamed_to VALUES (5)
+
+statement ok
+CREATE TABLE ducklake.fresh AS SELECT 6 AS i
+
+statement ok
+INSERT INTO ducklake.fresh VALUES (7)
+
+statement ok
+CREATE TABLE ducklake.s1.fresh_in_schema AS SELECT 8 AS i
+
+statement ok
+COMMIT
+
+statement ok
+SET VARIABLE path_queries = (
+  SELECT count(*) FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE query LIKE '%AS s_path%'
+)
+
+statement ok
+CALL disable_logging()
+
+# the commit takes the paths of the tables from the catalog, it does not query them
+query I
+SELECT getvariable('path_queries')
+----
+0
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake
+(DATA_PATH '{DATA_PATH}/commit_table_paths_from_catalog', DATA_INLINING_ROW_LIMIT 0)
+
+query IIIIIII
+SELECT (SELECT sum(i) FROM ducklake.plain), (SELECT sum(i) FROM ducklake.custom), (SELECT sum(i) FROM ducklake.s1.in_schema),
+       (SELECT sum(i) FROM ducklake.renamed_to), (SELECT sum(i) FROM ducklake.fresh),
+       (SELECT sum(i) FROM ducklake.s1.fresh_in_schema), (SELECT count(*) FROM ducklake.fresh)
+----
+1	5	4	5	13	8	2
+
+# every data file is in the directory of its table
+query III
+WITH files AS (
+  SELECT 'plain' AS tbl, data_file FROM ducklake_list_files('ducklake', 'plain')
+  UNION ALL
+  SELECT 'custom', data_file FROM ducklake_list_files('ducklake', 'custom')
+  UNION ALL
+  SELECT 'in_schema', data_file FROM ducklake_list_files('ducklake', 'in_schema', schema => 's1')
+  UNION ALL
+  SELECT 'renamed_to', data_file FROM ducklake_list_files('ducklake', 'renamed_to')
+  UNION ALL
+  SELECT 'fresh', data_file FROM ducklake_list_files('ducklake', 'fresh')
+  UNION ALL
+  SELECT 'fresh_in_schema', data_file FROM ducklake_list_files('ducklake', 'fresh_in_schema', schema => 's1')
+), dirs(tbl, dir) AS (
+  VALUES ('plain', '/commit_table_paths_from_catalog/main/plain/'),
+         ('custom', '/commit_table_paths_from_catalog/main/custom_dir/'),
+         ('in_schema', '/commit_table_paths_from_catalog_abs/in_schema_dir/'),
+         ('renamed_to', '/commit_table_paths_from_catalog/main/renamed/'),
+         ('fresh', '/commit_table_paths_from_catalog/main/fresh/'),
+         ('fresh_in_schema', '/commit_table_paths_from_catalog_abs/fresh_in_schema/')
+)
+SELECT tbl, count(*), count(*) FILTER (
+  starts_with(data_file.replace('\', '/'), '{DATA_PATH}'.replace('\', '/') || dir)
+)
+FROM files JOIN dirs USING (tbl)
+GROUP BY tbl
+ORDER BY tbl
+----
+custom	2	2
+fresh	2	2
+fresh_in_schema	1	1
+in_schema	1	1
+plain	1	1
+renamed_to	1	1
