@@ -46,7 +46,8 @@ struct DuckLakeCommitContext {
 	std::function<void(idx_t)> set_delete_commit_snapshot = [](idx_t) {
 	};
 	//! Executes the batched snapshot/changes SQL against the metadata DB.
-	std::function<unique_ptr<QueryResult>(DuckLakeSnapshot, DuckLakeBatch &)> execute_commit_batch;
+	//! Runs the batch of a commit attempt, last is set if nothing else runs before the commit of the connection
+	std::function<unique_ptr<QueryResult>(DuckLakeSnapshot, DuckLakeBatch &, bool last)> execute_commit_batch;
 	//! Classifies metadata-catalog errors that are safe to retry.
 	std::function<bool(const string &)> is_retryable_metadata_error = [](const string &) {
 		return false;

@@ -2844,7 +2844,7 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 				    CommitChanges(commit_state, attempt_changes, stats, context, attempt_dropped_file_stats);
 				batch_queries += WriteSnapshotChanges(commit_state, attempt_changes, context.commit_info);
 			}
-			auto res = context.execute_commit_batch(commit_snapshot, batch_queries);
+			auto res = context.execute_commit_batch(commit_snapshot, batch_queries, expired_snapshots.empty());
 			if (res->HasError()) {
 				auto &commit_error = res->GetErrorObject();
 				retryable_metadata_error = context.is_retryable_metadata_error(commit_error.RawMessage());

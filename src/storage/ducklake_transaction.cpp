@@ -1687,11 +1687,14 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 	auto config_option_lock = ConfigOptionLockSql();
 	context.locks_config_options = !config_option_lock.empty();
 	bool option_lock_failed = false;
-	context.execute_commit_batch = [&](DuckLakeSnapshot snapshot, DuckLakeBatch &query) {
+	context.execute_commit_batch = [&](DuckLakeSnapshot snapshot, DuckLakeBatch &query, bool last) {
 		option_lock_failed = false;
 		unique_ptr<QueryResult> result;
 		if (!query.empty()) {
-			result = metadata_manager->Execute(snapshot, query);
+			// the batch commits the metadata transaction where nothing follows it
+			auto commit = last && inlined_inserts.empty() && config_option_lock.empty();
+			result = commit ? metadata_manager->ExecuteAndCommit(snapshot, query)
+			                : metadata_manager->Execute(snapshot, query);
 		}
 		for (auto &insert : inlined_inserts) {
 			if (result->HasError()) {

@@ -304,6 +304,11 @@ public:
 	virtual unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, DuckLakeBatch &batch);
 	//! Runs the statements of a batch
 	virtual unique_ptr<QueryResult> Execute(DuckLakeBatch &batch);
+	//! Runs the statements of a batch and commits the metadata transaction with them where the catalog can do that
+	//! in the same round trip. The metadata connection is committed afterwards either way
+	virtual unique_ptr<QueryResult> ExecuteAndCommit(DuckLakeSnapshot snapshot, DuckLakeBatch &batch) {
+		return Execute(snapshot, batch);
+	}
 	//! Whether statements are in DuckDB's dialect, such as those of migrations, so that a catalog that runs
 	//! statements natively runs them through DuckDB instead
 	void SetDuckDBDialect(bool duckdb_dialect_p) {

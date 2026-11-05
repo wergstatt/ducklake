@@ -494,6 +494,14 @@ unique_ptr<QueryResult> PostgresMetadataManager::Execute(DuckLakeBatch &batch) {
 	return ExecutePipeline(batch, false);
 }
 
+unique_ptr<QueryResult> PostgresMetadataManager::ExecuteAndCommit(DuckLakeSnapshot snapshot, DuckLakeBatch &batch) {
+	if (duckdb_dialect) {
+		return DuckLakeMetadataManager::ExecuteAndCommit(snapshot, batch);
+	}
+	batch.TransformSql([&](string &sql) { SubstituteTransactionPlaceholders(snapshot, sql); });
+	return ExecutePipeline(batch, true);
+}
+
 unique_ptr<QueryResult> PostgresMetadataManager::ExecutePipeline(DuckLakeBatch &batch, bool commit) {
 	auto &ducklake_catalog = transaction.GetCatalog();
 	auto schema_identifier = SQLQuotedIdentifier::ToString(ducklake_catalog.MetadataSchemaName());
