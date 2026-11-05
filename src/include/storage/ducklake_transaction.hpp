@@ -431,15 +431,20 @@ private:
 	DuckLakeSnapshotTagInfo LiveSnapshotTag(const string &name);
 	//! Makes the changed tag the one the transaction commits for the live tag
 	void ChangeSnapshotTag(const DuckLakeSnapshotTagInfo &tag, DuckLakeSnapshotTagInfo changed);
-	set<idx_t> TaggedSnapshotsInternal();
+	//! The live tags read once, split into the snapshots that unexpired tags protect and the tags that have expired
+	struct SnapshotTagSplit {
+		set<idx_t> protected_snapshots;
+		vector<DuckLakeSnapshotTagInfo> expired;
+	};
+	SnapshotTagSplit SplitSnapshotTagsInternal();
 	vector<DuckLakeSnapshotInfo> ExpirableSnapshotsInternal(const string &filter);
+	vector<DuckLakeSnapshotInfo> ExpirableSnapshotsInternal(const string &filter, const SnapshotTagSplit &tags);
 	vector<DuckLakeSnapshotInfo> ExpireSnapshotsNow(const string &filter);
 	//! Whether the expiry time of the tag has passed at the start of the transaction
 	bool SnapshotTagExpired(const DuckLakeSnapshotTagInfo &tag) const;
 	//! Fails when the expiry time has passed at the start of the transaction
 	void CheckSnapshotTagExpiry(const string &name, const Value &expires_at) const;
 	//! The live tags whose expiry time has passed, which an expiry drops
-	vector<DuckLakeSnapshotTagInfo> ExpiredSnapshotTagsInternal();
 	//! What the commit attempt expires, what the statements expired for the first attempt
 	DuckLakeExpiry ExpiredSnapshotsForCommit(idx_t attempt, idx_t latest_snapshot_id);
 	bool ChangesMadeBesidesExpiry() const;
