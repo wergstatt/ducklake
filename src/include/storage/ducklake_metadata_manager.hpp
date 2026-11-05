@@ -230,6 +230,10 @@ public:
 	bool ExecuteRetrialsServerSide() const;
 	//! Whether the client can skip the snapshot fetch and let the server read it.
 	virtual bool CanSkipSnapshotFetch(const TransactionChangeInformation &changes) const;
+	//! Whether a commit changes only the data of existing tables
+	static bool IsDataOnlyCommit(const TransactionChangeInformation &changes);
+	//! Whether a commit makes changes that only the client-side commit can write
+	static bool RequiresClientSideCommit(DuckLakeTransaction &transaction);
 	virtual bool IsRetryableCommitError(const string &message) const;
 	//! Advice added to the error of a commit that failed for good
 	virtual string CommitErrorHint(const string &message) const;

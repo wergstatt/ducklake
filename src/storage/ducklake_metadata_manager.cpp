@@ -134,6 +134,22 @@ bool DuckLakeMetadataManager::CanSkipSnapshotFetch(const TransactionChangeInform
 	return false;
 }
 
+bool DuckLakeMetadataManager::IsDataOnlyCommit(const TransactionChangeInformation &c) {
+	return c.created_schemas.empty() && c.dropped_schemas.empty() && c.created_tables.empty() &&
+	       c.created_scalar_macros.empty() && c.created_table_macros.empty() && c.altered_tables.empty() &&
+	       c.altered_tables_with_schema_version_changes.empty() && c.altered_views.empty() &&
+	       c.dropped_tables.empty() && c.dropped_views.empty() && c.dropped_scalar_macros.empty() &&
+	       c.dropped_table_macros.empty() && !c.HasRefChanges();
+}
+
+bool DuckLakeMetadataManager::RequiresClientSideCommit(DuckLakeTransaction &transaction) {
+	// the server-side commit cannot create inlined-data tables, delete flushed inlined data, rewrite delete files or
+	// expire snapshots
+	return transaction.GetRequiresNewInlinedTable() || !transaction.GetFlushedInlinedTables().empty() ||
+	       !transaction.GetFlushedInlinedFileDeletions().empty() ||
+	       transaction.GetLocalChanges().HasDatedNewDeletes() || transaction.ExpiresSnapshotsOnCommit();
+}
+
 // LCOV_EXCL_START
 void DuckLakeMetadataManager::FlushChangesServerSide(DuckLakeTransaction &, DuckLakeSnapshot,
                                                      const TransactionChangeInformation &,

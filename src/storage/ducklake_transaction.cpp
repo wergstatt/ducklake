@@ -1573,8 +1573,12 @@ void DuckLakeTransaction::FlushChanges() {
 	};
 	forget_columns_with_values();
 	if (metadata_manager->CanSkipSnapshotFetch(transaction_changes)) {
-		lock_guard<mutex> guard(snapshot_lock);
-		auto transaction_snapshot = snapshot ? *snapshot : DuckLakeSnapshot();
+		DuckLakeSnapshot transaction_snapshot;
+		{
+			// released before the commit, which can fall back to the client-side commit that reads the snapshot
+			lock_guard<mutex> guard(snapshot_lock);
+			transaction_snapshot = snapshot ? *snapshot : DuckLakeSnapshot();
+		}
 		metadata_manager->FlushChangesServerSide(*this, transaction_snapshot, transaction_changes, retry_config);
 	} else {
 		auto transaction_snapshot = GetSnapshot();
