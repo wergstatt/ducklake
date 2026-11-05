@@ -12,6 +12,10 @@
 
 namespace duckdb {
 
+//! The statements that take the lock of a PostgreSQL catalog until the end of the metadata transaction. Writers wait
+//! for the lock instead of failing on the snapshot key, for as long as ducklake_postgres_lock_timeout_ms allows
+vector<DuckLakeStatement> PostgresCatalogLockStatements(DuckLakeTransaction &transaction);
+
 class PostgresMetadataManager : public DuckLakeMetadataManager {
 public:
 	explicit PostgresMetadataManager(DuckLakeTransaction &transaction);
@@ -56,6 +60,8 @@ public:
 	                            const TransactionChangeInformation &transaction_changes,
 	                            const DuckLakeRetryConfig &retry_config) override;
 	unique_ptr<QueryResult> ExecuteDropInTransaction(string &query) override;
+	void DeleteSnapshots(const vector<DuckLakeSnapshotInfo> &snapshots) override;
+	void CleanupExpiredSnapshots(const vector<DuckLakeSnapshotInfo> &snapshots) override;
 
 	void ClearCache() override;
 	//! postgres_scanner looks up a table it has not cached

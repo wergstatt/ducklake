@@ -38,6 +38,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Whether pipeline commits take a lock, so that concurrent pipeline commits wait instead "
 	                          "of retrying (experimental)",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true), nullptr, SetScope::GLOBAL);
+	config.AddExtensionOption("ducklake_postgres_lock_timeout_ms",
+	                          "How long a commit or snapshot expiry on a PostgreSQL catalog waits for the lock of the "
+	                          "catalog, in milliseconds (0 waits without a limit)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(30000), nullptr, SetScope::GLOBAL);
 	config.AddExtensionOption("ducklake_retry_wait_ms", "Time between retries", LogicalType::UBIGINT,
 	                          Value::UBIGINT(100), nullptr, SetScope::GLOBAL);
 	config.AddExtensionOption("ducklake_retry_backoff", "Backoff factor for exponentially increasing retry wait time",

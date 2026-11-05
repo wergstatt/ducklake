@@ -382,11 +382,10 @@ vector<Value> PostgresMetadataManager::PipelineCommitStatements(DuckLakeSnapshot
 		// advisory lock does not wait for other writers of the metadata, such as an open transaction that expired
 		// snapshots, whose snapshot ids the primary key checks. A lock that takes too long falls back to the client.
 		// Without the lock, a commit that lost a race fails on the primary key and retries on the client
-		statements.push_back(PipelineStatement("SET LOCAL lock_timeout = '1s'", {}));
 		statements.push_back(PipelineStatement("SET LOCAL idle_in_transaction_session_timeout = '10s'", {}));
-		statements.push_back(
-		    PipelineStatement("SELECT pg_advisory_xact_lock(hashtext($1))",
-		                      {Value("ducklake_commit:" + catalog.MetadataSchemaName().GetIdentifierName())}));
+		for (auto &lock_statement : PostgresCatalogLockStatements(transaction)) {
+			statements.push_back(PipelineStatement(lock_statement.sql, lock_statement.params));
+		}
 	}
 	// a concurrent change that the client-side commit checks for, or stats it would complete, abort the commit with a
 	// not-null violation, after which the client-side commit runs
@@ -396,18 +395,21 @@ vector<Value> PostgresMetadataManager::PipelineCommitStatements(DuckLakeSnapshot
 	// the first insert into a table creates its stats, as empty ones that the updates below fill. Without the lock,
 	// two first inserts could both create them, so the client-side commit does
 	if (BooleanSetting(transaction, "ducklake_postgres_pipeline_lock")) {
-	statements.push_back(PipelineStatement(
-	    "INSERT INTO {METADATA_CATALOG}.ducklake_table_column_stats (table_id, column_id, contains_null, contains_nan) "
-	    "SELECT n.t, n.c, false, false FROM jsonb_to_recordset($1::JSONB) AS n(t BIGINT, c BIGINT) "
-	    "WHERE NOT EXISTS (SELECT 1 FROM {METADATA_CATALOG}.ducklake_table_stats ts WHERE ts.table_id = n.t) "
-	    "AND NOT EXISTS (SELECT 1 FROM {METADATA_CATALOG}.ducklake_table_column_stats g "
-	    "WHERE g.table_id = n.t AND g.column_id = n.c)",
-	    {guarded_columns.ToValue()}));
-	statements.push_back(PipelineStatement(
-	    "INSERT INTO {METADATA_CATALOG}.ducklake_table_stats (table_id, record_count, next_row_id, file_size_bytes) "
-	    "SELECT t.id::BIGINT, 0, 0, 0 FROM jsonb_array_elements_text($1::JSONB) AS t(id) "
-	    "WHERE NOT EXISTS (SELECT 1 FROM {METADATA_CATALOG}.ducklake_table_stats ts WHERE ts.table_id = t.id::BIGINT)",
-	    {tables.ToValue()}));
+		statements.push_back(PipelineStatement(
+		    "INSERT INTO {METADATA_CATALOG}.ducklake_table_column_stats (table_id, column_id, contains_null, "
+		    "contains_nan) "
+		    "SELECT n.t, n.c, false, false FROM jsonb_to_recordset($1::JSONB) AS n(t BIGINT, c BIGINT) "
+		    "WHERE NOT EXISTS (SELECT 1 FROM {METADATA_CATALOG}.ducklake_table_stats ts WHERE ts.table_id = n.t) "
+		    "AND NOT EXISTS (SELECT 1 FROM {METADATA_CATALOG}.ducklake_table_column_stats g "
+		    "WHERE g.table_id = n.t AND g.column_id = n.c)",
+		    {guarded_columns.ToValue()}));
+		statements.push_back(
+		    PipelineStatement("INSERT INTO {METADATA_CATALOG}.ducklake_table_stats (table_id, record_count, "
+		                      "next_row_id, file_size_bytes) "
+		                      "SELECT t.id::BIGINT, 0, 0, 0 FROM jsonb_array_elements_text($1::JSONB) AS t(id) "
+		                      "WHERE NOT EXISTS (SELECT 1 FROM {METADATA_CATALOG}.ducklake_table_stats ts WHERE "
+		                      "ts.table_id = t.id::BIGINT)",
+		                      {tables.ToValue()}));
 	}
 	snapshot_statement = statements.size();
 	statements.push_back(PipelineStatement(

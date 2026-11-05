@@ -541,6 +541,156 @@ unique_ptr<QueryResult> PostgresMetadataManager::ExecuteDropInTransaction(string
 	return ExecutePipeline(batch, true);
 }
 
+//! What expiring snapshots leaves behind, removed on the server: no round trip reads it to the client
+vector<DuckLakeStatement> PostgresCatalogLockStatements(DuckLakeTransaction &transaction) {
+	Value timeout_ms(LogicalType::UBIGINT);
+	auto context = transaction.context.lock();
+	if (context) {
+		context->TryGetCurrentSetting("ducklake_postgres_lock_timeout_ms", timeout_ms);
+	}
+	auto wait = timeout_ms.IsNull() ? idx_t(0) : UBigIntValue::Get(timeout_ms);
+	return {{StringUtil::Format("SET LOCAL lock_timeout = '%dms'", wait), {}},
+	        {"SELECT pg_advisory_xact_lock(hashtext($1))",
+	         {Value("ducklake_commit:" + transaction.GetCatalog().MetadataSchemaName().GetIdentifierName())}}};
+}
+
+static string CleanupExpiredSnapshotsSql(const vector<string> &end_snapshot_tables) {
+	return StringUtil::Format(R"($ducklake_cleanup$
+DECLARE
+	dead_tables BIGINT[];
+	r RECORD;
+BEGIN
+	SELECT COALESCE(ARRAY_AGG(table_id), '{}') INTO dead_tables
+	FROM {METADATA_CATALOG}.ducklake_table x
+	WHERE end_snapshot IS NOT NULL
+	  AND NOT EXISTS (SELECT 1 FROM {METADATA_CATALOG}.ducklake_snapshot
+	                  WHERE snapshot_id >= x.begin_snapshot AND snapshot_id < x.end_snapshot)
+	  AND NOT EXISTS (SELECT 1 FROM {METADATA_CATALOG}.ducklake_table t2
+	                  WHERE t2.table_id = x.table_id
+	                    AND (t2.end_snapshot IS NULL OR EXISTS (SELECT 1 FROM {METADATA_CATALOG}.ducklake_snapshot
+	                         WHERE snapshot_id >= t2.begin_snapshot AND snapshot_id < t2.end_snapshot)));
+	WITH table_paths AS (
+		SELECT DISTINCT ON (t.table_id) t.table_id,
+		       CASE WHEN t.path IS NULL THEN schema_path
+		            WHEN t.path_is_relative THEN schema_path || t.path
+		            ELSE t.path END AS table_path
+		FROM {METADATA_CATALOG}.ducklake_table t
+		JOIN {METADATA_CATALOG}.ducklake_schema s USING (schema_id),
+		LATERAL (SELECT CASE WHEN s.path IS NULL THEN {DATA_PATH}
+		                     WHEN s.path_is_relative THEN {DATA_PATH} || s.path
+		                     ELSE s.path END AS schema_path) sp),
+	dead_data_files AS (
+		DELETE FROM {METADATA_CATALOG}.ducklake_data_file f
+		WHERE f.table_id = ANY(dead_tables)
+		   OR (f.end_snapshot IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {METADATA_CATALOG}.ducklake_snapshot s
+		       WHERE s.snapshot_id >= f.begin_snapshot AND s.snapshot_id < f.end_snapshot))
+		RETURNING data_file_id, table_id, path, path_is_relative),
+	column_stats AS (DELETE FROM {METADATA_CATALOG}.ducklake_file_column_stats
+	                 WHERE data_file_id IN (SELECT data_file_id FROM dead_data_files)),
+	variant_stats AS (DELETE FROM {METADATA_CATALOG}.ducklake_file_variant_stats
+	                  WHERE data_file_id IN (SELECT data_file_id FROM dead_data_files)),
+	partition_values AS (DELETE FROM {METADATA_CATALOG}.ducklake_file_partition_value
+	                     WHERE data_file_id IN (SELECT data_file_id FROM dead_data_files)),
+	dead_delete_files AS (
+		DELETE FROM {METADATA_CATALOG}.ducklake_delete_file f
+		WHERE f.table_id = ANY(dead_tables)
+		   OR f.data_file_id IN (SELECT data_file_id FROM dead_data_files)
+		   OR (f.end_snapshot IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {METADATA_CATALOG}.ducklake_snapshot s
+		       WHERE s.snapshot_id >= f.begin_snapshot AND s.snapshot_id < f.end_snapshot))
+		RETURNING delete_file_id AS data_file_id, table_id, path, path_is_relative),
+	dead_files AS (
+		SELECT * FROM dead_data_files UNION ALL SELECT * FROM dead_delete_files),
+	full_paths AS (
+		SELECT d.data_file_id,
+		       CASE WHEN d.path_is_relative THEN COALESCE(p.table_path, {DATA_PATH}) || d.path ELSE d.path END AS full_path
+		FROM dead_files d LEFT JOIN table_paths p USING (table_id))
+	INSERT INTO {METADATA_CATALOG}.ducklake_files_scheduled_for_deletion
+		(data_file_id, path, path_is_relative, schedule_start)
+	SELECT data_file_id,
+	       CASE WHEN starts_with(full_path, {DATA_PATH}) THEN substr(full_path, length({DATA_PATH}) + 1) ELSE full_path END,
+	       starts_with(full_path, {DATA_PATH}), NOW()
+	FROM full_paths;
+	FOR r IN SELECT table_name FROM {METADATA_CATALOG}.ducklake_inlined_data_tables WHERE table_id = ANY(dead_tables) LOOP
+		EXECUTE FORMAT('DROP TABLE IF EXISTS %%I.%%I', {METADATA_SCHEMA_NAME_LITERAL}, r.table_name);
+	END LOOP;
+	FOR r IN SELECT UNNEST(dead_tables) AS table_id LOOP
+		EXECUTE FORMAT('DROP TABLE IF EXISTS %%I.%%I', {METADATA_SCHEMA_NAME_LITERAL}, 'ducklake_inlined_delete_' || r.table_id);
+	END LOOP;
+	DELETE FROM {METADATA_CATALOG}.ducklake_table WHERE table_id = ANY(dead_tables);
+	DELETE FROM {METADATA_CATALOG}.ducklake_table_stats WHERE table_id = ANY(dead_tables);
+	DELETE FROM {METADATA_CATALOG}.ducklake_table_column_stats WHERE table_id = ANY(dead_tables);
+	DELETE FROM {METADATA_CATALOG}.ducklake_partition_info WHERE table_id = ANY(dead_tables);
+	DELETE FROM {METADATA_CATALOG}.ducklake_partition_column WHERE table_id = ANY(dead_tables);
+	DELETE FROM {METADATA_CATALOG}.ducklake_column WHERE table_id = ANY(dead_tables);
+	DELETE FROM {METADATA_CATALOG}.ducklake_column_tag WHERE table_id = ANY(dead_tables);
+	DELETE FROM {METADATA_CATALOG}.ducklake_sort_info WHERE table_id = ANY(dead_tables);
+	DELETE FROM {METADATA_CATALOG}.ducklake_sort_expression WHERE table_id = ANY(dead_tables);
+	DELETE FROM {METADATA_CATALOG}.ducklake_schema_versions WHERE table_id = ANY(dead_tables);
+	DELETE FROM {METADATA_CATALOG}.ducklake_inlined_data_tables WHERE table_id = ANY(dead_tables);
+	DELETE FROM {METADATA_CATALOG}.ducklake_column_mapping WHERE table_id = ANY(dead_tables);
+	DELETE FROM {METADATA_CATALOG}.ducklake_metadata WHERE scope = 'table' AND scope_id = ANY(dead_tables);
+	FOR r IN SELECT UNNEST(ARRAY[%s]::TEXT[]) AS table_name LOOP
+		EXECUTE FORMAT('DELETE FROM %%I.%%I WHERE end_snapshot IS NOT NULL AND NOT EXISTS (SELECT 1 FROM %%I.ducklake_snapshot '
+		               'WHERE snapshot_id >= begin_snapshot AND snapshot_id < end_snapshot)',
+		               {METADATA_SCHEMA_NAME_LITERAL}, r.table_name, {METADATA_SCHEMA_NAME_LITERAL});
+	END LOOP;
+	DELETE FROM {METADATA_CATALOG}.ducklake_metadata
+	WHERE scope = 'schema' AND NOT EXISTS (SELECT 1 FROM {METADATA_CATALOG}.ducklake_schema WHERE schema_id = scope_id);
+	FOR r IN SELECT table_name FROM {METADATA_CATALOG}.ducklake_inlined_data_tables LOOP
+		EXECUTE FORMAT('DELETE FROM %%I.%%I WHERE "_ducklake_end_snapshot" IS NOT NULL AND NOT EXISTS ('
+		               'SELECT 1 FROM %%I.ducklake_snapshot WHERE snapshot_id >= "_ducklake_begin_snapshot" '
+		               'AND snapshot_id < "_ducklake_end_snapshot")',
+		               {METADATA_SCHEMA_NAME_LITERAL}, r.table_name, {METADATA_SCHEMA_NAME_LITERAL});
+	END LOOP;
+	DELETE FROM {METADATA_CATALOG}.ducklake_macro_impl m
+	WHERE NOT EXISTS (SELECT 1 FROM {METADATA_CATALOG}.ducklake_macro x WHERE x.macro_id = m.macro_id);
+	DELETE FROM {METADATA_CATALOG}.ducklake_macro_parameters m
+	WHERE NOT EXISTS (SELECT 1 FROM {METADATA_CATALOG}.ducklake_macro x WHERE x.macro_id = m.macro_id);
+	DELETE FROM {METADATA_CATALOG}.ducklake_name_mapping n
+	WHERE NOT EXISTS (SELECT 1 FROM {METADATA_CATALOG}.ducklake_column_mapping c WHERE c.mapping_id = n.mapping_id);
+END
+$ducklake_cleanup$)",
+	                          StringUtil::Join(end_snapshot_tables, end_snapshot_tables.size(), ", ",
+	                                           [](const string &table) { return "'" + table + "'"; }));
+}
+
+static DuckLakeBatch CleanupExpiredSnapshotsBatch(DuckLakeCatalog &catalog) {
+	vector<string> end_snapshot_tables {"ducklake_schema", "ducklake_view", "ducklake_tag", "ducklake_macro"};
+	if (catalog.SupportsV1_1Metadata()) {
+		end_snapshot_tables.push_back("ducklake_view_column_tag");
+	}
+	if (catalog.SupportsSnapshotTags()) {
+		end_snapshot_tables.push_back("ducklake_snapshot_tag");
+	}
+	return DuckLakeBatch("DO " + CleanupExpiredSnapshotsSql(end_snapshot_tables));
+}
+
+void PostgresMetadataManager::CleanupExpiredSnapshots(const vector<DuckLakeSnapshotInfo> &) {
+	auto batch = CleanupExpiredSnapshotsBatch(transaction.GetCatalog());
+	Execute(batch)->ThrowIfError("Failed to clean up expired snapshots in DuckLake: ");
+	// the cleanup can drop inlined tables
+	ClearCache();
+}
+
+void PostgresMetadataManager::DeleteSnapshots(const vector<DuckLakeSnapshotInfo> &snapshots) {
+	// the deletion and its cleanup share one pipeline
+	DuckLakeBatch batch;
+	for (auto &statement : PostgresCatalogLockStatements(transaction)) {
+		batch += statement;
+	}
+	batch += DuckLakeBatch(DeleteSnapshotsSql(snapshots)) + CleanupExpiredSnapshotsBatch(transaction.GetCatalog());
+	auto result = Execute(batch);
+	if (result->HasError() && StringUtil::Contains(result->GetError(), "lock timeout")) {
+		throw TransactionException(
+		    "Expiring snapshots waited longer than ducklake_postgres_lock_timeout_ms for the lock "
+		    "of the catalog, which another commit holds: %s",
+		    result->GetError());
+	}
+	result->ThrowIfError("Failed to delete snapshots in DuckLake: ");
+	// the cleanup can drop inlined tables
+	ClearCache();
+}
+
 void PostgresMetadataManager::ClearCache() {
 	// clear the cache of the metadata catalog alone, a global clear breaks queries running in other Postgres catalogs
 	auto &catalog = transaction.GetCatalog();

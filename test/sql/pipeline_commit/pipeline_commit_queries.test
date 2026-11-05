@@ -51,8 +51,8 @@ SELECT row_number() OVER () AS n, left(replace(parse_duckdb_log_message('Postgre
 FROM duckdb_logs() WHERE type = 'PostgresQueryLog'
 ----
 1	BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED; SELECT snapshot_id, 
-2	SET LOCAL lock_timeout = '1s'
-3	SET LOCAL idle_in_transaction_session_timeout = '10s'
+2	SET LOCAL idle_in_transaction_session_timeout = '10s'
+3	SET LOCAL lock_timeout = '30000ms'
 4	SELECT pg_advisory_xact_lock(hashtext($1))
 5	INSERT INTO "pipeline_queries".ducklake_table_column_stats (table_id, 
 6	INSERT INTO "pipeline_queries".ducklake_table_stats (table_id, record_

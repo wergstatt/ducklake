@@ -1,0 +1,52 @@
+# name: test/sql/pipeline_commit/expire_snapshots_lock.test
+# description: expiring snapshots on PostgreSQL takes the lock of the catalog, which waits as long as the setting says
+# group: [pipeline_commit]
+
+require ducklake
+
+require parquet
+
+require postgres_scanner
+
+require-env DUCKLAKE_CI
+
+require-env DUCKLAKE_CONNECTION postgres:dbname=ducklakedb
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH '{DUCKLAKE_CONNECTION}' AS pg
+
+statement ok
+CALL postgres_execute('pg', 'DROP SCHEMA IF EXISTS expire_lock CASCADE')
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/expire_lock', METADATA_SCHEMA 'expire_lock')
+
+statement ok
+CREATE TABLE dl.t (i INTEGER)
+
+statement ok
+INSERT INTO dl.t VALUES (1)
+
+statement ok
+SET ducklake_postgres_lock_timeout_ms = 4321
+
+statement ok
+CALL enable_logging(level = 'debug', storage = 'memory')
+
+statement ok
+CALL ducklake_expire_snapshots('dl', older_than => now())
+
+# the lock comes first, and the cleanup is one DO block
+query II
+SELECT count(*) FILTER (WHERE q = 'SET LOCAL lock_timeout = ''4321ms'''),
+       count(*) FILTER (WHERE q LIKE 'SELECT pg_advisory_xact_lock%')
+FROM (SELECT query AS q FROM duckdb_logs_parsed('PostgresQueryLog'))
+----
+1	1
+
+query I
+SELECT count(*) FROM (SELECT query AS q FROM duckdb_logs_parsed('PostgresQueryLog')) WHERE q LIKE 'DO %'
+----
+1
