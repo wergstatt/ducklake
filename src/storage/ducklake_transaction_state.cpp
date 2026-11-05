@@ -2290,8 +2290,13 @@ DuckLakeBatch DuckLakeTransactionState::CommitChanges(
 	auto get_table_path = [&](TableIndex table_id) -> const string & {
 		auto entry = table_paths.find(table_id.index);
 		if (entry == table_paths.end()) {
-			auto path = DuckLakeMetadataManager::GetPathForTable(table_id, new_tables_result, context.query_metadata,
-			                                                     data_path, separator);
+			auto is_new = std::any_of(new_tables_result.begin(), new_tables_result.end(),
+			                          [&](const DuckLakeTableInfo &table) { return table.id == table_id; });
+			auto path = is_new ? string() : context.get_table_path(table_id);
+			if (path.empty()) {
+				path = DuckLakeMetadataManager::GetPathForTable(table_id, new_tables_result, context.query_metadata,
+				                                                data_path, separator);
+			}
 			entry = table_paths.emplace(table_id.index, std::move(path)).first;
 		}
 		return entry->second;

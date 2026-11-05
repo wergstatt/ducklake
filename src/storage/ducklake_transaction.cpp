@@ -1650,6 +1650,13 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 	context.get_snapshot = [&]() {
 		return GetSnapshot();
 	};
+	context.get_table_path = [&](TableIndex table_id) {
+		auto entry = ducklake_catalog.GetEntryById(*this, transaction_snapshot, table_id);
+		if (!entry || entry->type != CatalogType::TABLE_ENTRY) {
+			return string();
+		}
+		return entry->Cast<DuckLakeTableEntry>().DataPath();
+	};
 	vector<DuckLakeSnapshotInfo> committed_expiry;
 	bool expired_by_statements = false;
 	if (ExpiresSnapshotsOnCommit()) {

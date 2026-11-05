@@ -118,6 +118,10 @@ struct DuckLakeCommitContext {
 	};
 	//! Returns the current global table stats for a single table id (first-attempt path).
 	std::function<shared_ptr<DuckLakeTableStats>(TableIndex)> get_table_stats;
+	//! The data path of a committed table that the transaction knows, empty if it does not know it
+	std::function<string(TableIndex)> get_table_path = [](TableIndex) {
+		return string();
+	};
 	//! Top-level columns of a table at the commit snapshot — needed by stats-refresh to iterate
 	//! columns and look up types when merging per-file stats.
 	std::function<vector<DuckLakeColumnSchemaEntry>(TableIndex)> get_table_column_schema = [](TableIndex) {
