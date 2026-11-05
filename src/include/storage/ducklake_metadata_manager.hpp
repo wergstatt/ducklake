@@ -361,6 +361,14 @@ public:
 	BuildCatalogForSnapshot(DuckLakeSnapshot snapshot,
 	                        const std::function<unique_ptr<QueryResult>(DuckLakeSnapshot, string)> &query_executor,
 	                        const string &base_data_path, const string &separator, bool supports_v1_1_metadata = false);
+	//! The partitions of the tables of a snapshot
+	static vector<DuckLakePartitionInfo>
+	GetPartitionsForSnapshot(DuckLakeSnapshot snapshot,
+	                         const std::function<unique_ptr<QueryResult>(DuckLakeSnapshot, string)> &query_executor);
+	//! The sort keys of the tables of a snapshot
+	static vector<DuckLakeSortInfo>
+	GetSortsForSnapshot(DuckLakeSnapshot snapshot,
+	                    const std::function<unique_ptr<QueryResult>(DuckLakeSnapshot, string)> &query_executor);
 	//! The global stats of every table of the snapshot, or of the given tables
 	virtual vector<DuckLakeGlobalStatsInfo> GetGlobalTableStats(DuckLakeSnapshot snapshot,
 	                                                            const vector<TableIndex> &table_ids = {});

@@ -2317,13 +2317,15 @@ DuckLakeBatch DuckLakeTransactionState::CommitChanges(
 		batch_queries += DuckLakeMetadataManager::WriteNewTables(result.new_tables, resolved_table_paths);
 		batch_queries += DuckLakeMetadataManager::WriteNewTableOptions(result.new_table_options);
 		committed_table_options = result.new_table_options;
-		auto existing_catalog =
-		    DuckLakeMetadataManager::BuildCatalogForSnapshot(commit_snapshot, context.query_metadata_with_snapshot,
-		                                                     data_path, separator, context.supports_v1_1_metadata);
-		batch_queries +=
-		    DuckLakeMetadataManager::WriteNewPartitionKeys(existing_catalog.partitions, result.new_partition_keys);
+		// the committed partitions and sorts are only compared with new ones
+		vector<DuckLakePartitionInfo> existing_partitions;
+		if (!result.new_partition_keys.empty()) {
+			existing_partitions = DuckLakeMetadataManager::GetPartitionsForSnapshot(
+			    commit_snapshot, context.query_metadata_with_snapshot);
+		}
+		batch_queries += DuckLakeMetadataManager::WriteNewPartitionKeys(existing_partitions, result.new_partition_keys);
 		auto unchanged_partition_ids =
-		    DuckLakeMetadataManager::GetUnchangedPartitionIds(existing_catalog.partitions, result.new_partition_keys);
+		    DuckLakeMetadataManager::GetUnchangedPartitionIds(existing_partitions, result.new_partition_keys);
 		for (auto &partition_id : commit_state.committed_partition_ids) {
 			// files of a spec that equals the committed one keep the committed spec
 			auto unchanged = unchanged_partition_ids.find(partition_id.second);
@@ -2359,7 +2361,11 @@ DuckLakeBatch DuckLakeTransactionState::CommitChanges(
 		batch_queries += WriteAddedFieldStats(result.added_fields, stats, context);
 		batch_queries += context.write_inlined_tables(commit_snapshot, result.new_inlined_data_tables,
 		                                              commit_state.replaced_inlined_tables);
-		batch_queries += DuckLakeMetadataManager::WriteNewSortKeys(existing_catalog.sorts, result.new_sort_keys);
+		if (!result.new_sort_keys.empty()) {
+			batch_queries += DuckLakeMetadataManager::WriteNewSortKeys(
+			    DuckLakeMetadataManager::GetSortsForSnapshot(commit_snapshot, context.query_metadata_with_snapshot),
+			    result.new_sort_keys);
+		}
 		new_tables_result = result.new_tables;
 		new_inlined_data_tables_result = result.new_inlined_data_tables;
 	}
