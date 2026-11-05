@@ -17,11 +17,10 @@ namespace duckdb {
 static constexpr const char *LATEST_SNAPSHOT =
     "(SELECT snapshot_id, next_file_id FROM {METADATA_CATALOG}.ducklake_snapshot ORDER BY snapshot_id DESC LIMIT 1)";
 
-static bool PipelineCommitEnabled(DuckLakeTransaction &transaction) {
+static bool BooleanSetting(DuckLakeTransaction &transaction, const char *name) {
 	auto context = transaction.context.lock();
 	Value enabled;
-	return context && context->TryGetCurrentSetting("ducklake_postgres_pipeline_commit", enabled) &&
-	       !enabled.IsNull() && BooleanValue::Get(enabled);
+	return context && context->TryGetCurrentSetting(name, enabled) && !enabled.IsNull() && BooleanValue::Get(enabled);
 }
 
 static Value PipelineStatement(const string &query, vector<Value> params) {
@@ -378,14 +377,17 @@ vector<Value> PostgresMetadataManager::PipelineCommitStatements(DuckLakeSnapshot
 	}
 	auto file_count = Value(to_string(file_offset));
 	vector<Value> statements;
-	// the pipeline commits of a catalog wait for each other, so that their ids follow the order of the commits. An
-	// advisory lock does not wait for other writers of the metadata, such as an open transaction that expired
-	// snapshots, whose snapshot ids the primary key checks. A lock that takes too long falls back to the client
-	statements.push_back(PipelineStatement("SET LOCAL lock_timeout = '1s'", {}));
-	statements.push_back(PipelineStatement("SET LOCAL idle_in_transaction_session_timeout = '10s'", {}));
-	statements.push_back(
-	    PipelineStatement("SELECT pg_advisory_xact_lock(hashtext($1))",
-	                      {Value("ducklake_commit:" + catalog.MetadataSchemaName().GetIdentifierName())}));
+	if (BooleanSetting(transaction, "ducklake_postgres_pipeline_lock")) {
+		// the pipeline commits of a catalog wait for each other, so that their ids follow the order of the commits. An
+		// advisory lock does not wait for other writers of the metadata, such as an open transaction that expired
+		// snapshots, whose snapshot ids the primary key checks. A lock that takes too long falls back to the client.
+		// Without the lock, a commit that lost a race fails on the primary key and retries on the client
+		statements.push_back(PipelineStatement("SET LOCAL lock_timeout = '1s'", {}));
+		statements.push_back(PipelineStatement("SET LOCAL idle_in_transaction_session_timeout = '10s'", {}));
+		statements.push_back(
+		    PipelineStatement("SELECT pg_advisory_xact_lock(hashtext($1))",
+		                      {Value("ducklake_commit:" + catalog.MetadataSchemaName().GetIdentifierName())}));
+	}
 	// a concurrent change that the client-side commit checks for, or stats it would complete, abort the commit with a
 	// not-null violation, after which the client-side commit runs
 	auto conflicts = StringUtil::Format(
@@ -520,7 +522,8 @@ bool PostgresMetadataManager::RetriesOnClient(const string &message) const {
 }
 
 bool PostgresMetadataManager::CanSkipSnapshotFetch(const TransactionChangeInformation &changes) const {
-	return PipelineCommitEnabled(transaction) && IsDataOnlyCommit(changes) && !RequiresClientSideCommit(transaction);
+	return BooleanSetting(transaction, "ducklake_postgres_pipeline_commit") && IsDataOnlyCommit(changes) &&
+	       !RequiresClientSideCommit(transaction);
 }
 
 void PostgresMetadataManager::FlushChangesServerSide(DuckLakeTransaction &flush_transaction,

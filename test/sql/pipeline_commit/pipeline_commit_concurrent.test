@@ -64,3 +64,27 @@ query I
 SELECT next_row_id FROM postgres_query('pg', 'SELECT next_row_id FROM pipeline_concurrent.ducklake_table_stats')
 ----
 9
+
+# without the lock, concurrent commits collide on the primary key and retry on the client
+statement ok
+SET GLOBAL ducklake_postgres_pipeline_lock = false
+
+statement ok
+SET GLOBAL ducklake_max_retry_count = 100
+
+statement ok
+SET GLOBAL ducklake_retry_wait_ms = 1
+
+concurrentloop i 0 8
+
+query I
+INSERT INTO dl.t VALUES (100 + {i})
+----
+1
+
+endloop
+
+query II
+SELECT count(*), max(i) FROM dl.t
+----
+17	107

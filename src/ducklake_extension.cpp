@@ -34,6 +34,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Commit new data files on a PostgreSQL catalog as one pipeline that resolves ids and "
 	                          "stats on the server (experimental)",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(false), nullptr, SetScope::GLOBAL);
+	config.AddExtensionOption("ducklake_postgres_pipeline_lock",
+	                          "Whether pipeline commits take a lock, so that concurrent pipeline commits wait instead "
+	                          "of retrying (experimental)",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true), nullptr, SetScope::GLOBAL);
 	config.AddExtensionOption("ducklake_retry_wait_ms", "Time between retries", LogicalType::UBIGINT,
 	                          Value::UBIGINT(100), nullptr, SetScope::GLOBAL);
 	config.AddExtensionOption("ducklake_retry_backoff", "Backoff factor for exponentially increasing retry wait time",
