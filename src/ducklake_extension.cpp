@@ -30,6 +30,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("ducklake_max_retry_count",
 	                          "The maximum amount of retry attempts for a ducklake transaction", LogicalType::UBIGINT,
 	                          Value::UBIGINT(10), nullptr, SetScope::GLOBAL);
+	config.AddExtensionOption("ducklake_postgres_pipeline_commit",
+	                          "Commit new data files on a PostgreSQL catalog as one pipeline that resolves ids and "
+	                          "stats on the server (experimental)",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(false), nullptr, SetScope::GLOBAL);
 	config.AddExtensionOption("ducklake_retry_wait_ms", "Time between retries", LogicalType::UBIGINT,
 	                          Value::UBIGINT(100), nullptr, SetScope::GLOBAL);
 	config.AddExtensionOption("ducklake_retry_backoff", "Backoff factor for exponentially increasing retry wait time",

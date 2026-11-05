@@ -1,0 +1,128 @@
+# name: test/sql/pipeline_commit/pipeline_commit_stats.test
+# description: the stats that a pipeline commit merges on the server equal those of the client-side commit
+# group: [pipeline_commit]
+
+require ducklake
+
+require parquet
+
+require postgres_scanner
+
+require-env DUCKLAKE_CI
+
+require-env DUCKLAKE_CONNECTION postgres:dbname=ducklakedb
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH '{DUCKLAKE_CONNECTION}' AS pg
+
+statement ok
+CALL postgres_execute('pg', 'DROP SCHEMA IF EXISTS pipeline_stats CASCADE')
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/pipeline_stats',
+  METADATA_SCHEMA 'pipeline_stats', DATA_INLINING_ROW_LIMIT 0,
+  METADATA_PARAMETERS MAP {'isolation_level': 'read committed'})
+
+foreach tbl client server
+
+statement ok
+CREATE TABLE dl.{tbl} (i INTEGER, d DOUBLE, s VARCHAR, dt DATE, ts TIMESTAMP, dec DECIMAL(10, 2), b BOOLEAN)
+
+endloop
+
+# the first insert into each table writes its stats on the client
+foreach tbl client server
+
+statement ok
+INSERT INTO dl.{tbl} VALUES (5, 2.5, 'm', DATE '2026-01-05', TIMESTAMP '2026-01-05 10:00:00', 5.50, true)
+
+endloop
+
+statement ok
+CALL enable_logging('PostgresQueryLog', level = 'debug', storage = 'memory')
+
+foreach tbl client server
+
+statement ok
+SET ducklake_postgres_pipeline_commit = '{tbl}' = 'server'
+
+# lower bounds, NULLs, a NaN (which leaves the bounds of the column unknown), upper bounds, the same bounds
+# again, and only NULLs
+statement ok
+INSERT INTO dl.{tbl} VALUES (1, -1.0, 'a', DATE '2025-12-31', TIMESTAMP '2026-01-01 00:00:00', 1.25, false),
+  (NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+
+statement ok
+INSERT INTO dl.{tbl} VALUES (9, 'nan'::DOUBLE, 'zz', DATE '2027-01-01', TIMESTAMP '2027-01-01 00:00:00', 99.99, true)
+
+statement ok
+INSERT INTO dl.{tbl} VALUES (10, 10.0, 'zz', DATE '2027-01-01', TIMESTAMP '2027-01-01 00:00:00', 99.99, true)
+
+statement ok
+INSERT INTO dl.{tbl} VALUES (NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+
+endloop
+
+statement ok
+CALL disable_logging()
+
+# the inserts into the server table took the pipeline
+query I
+SELECT count(*) FROM duckdb_logs() WHERE type = 'PostgresQueryLog'
+  AND parse_duckdb_log_message('PostgresQueryLog', message).query LIKE 'SELECT pg_advisory_xact_lock%'
+----
+4
+
+query I
+SELECT count(*) FROM (
+  (SELECT * EXCLUDE (table_id) FROM postgres_query('pg', 'SELECT c.* FROM pipeline_stats.ducklake_table_column_stats c
+     JOIN pipeline_stats.ducklake_table t USING (table_id) WHERE t.table_name = ''client'''))
+  EXCEPT
+  (SELECT * EXCLUDE (table_id) FROM postgres_query('pg', 'SELECT c.* FROM pipeline_stats.ducklake_table_column_stats c
+     JOIN pipeline_stats.ducklake_table t USING (table_id) WHERE t.table_name = ''server'''))
+)
+----
+0
+
+query IIIIIIII
+SELECT c.column_id, c.contains_null, c.contains_nan, c.min_value, c.max_value, c.extra_stats, c.min_is_exact, c.max_is_exact
+FROM postgres_query('pg', 'SELECT c.* FROM pipeline_stats.ducklake_table_column_stats c
+  JOIN pipeline_stats.ducklake_table t USING (table_id) WHERE t.table_name = ''server''') c
+ORDER BY c.column_id
+----
+1	true	NULL	1	10	NULL	true	true
+2	true	true	NULL	NULL	NULL	NULL	NULL
+3	true	NULL	a	zz	NULL	true	true
+4	true	NULL	2025-12-31	2027-01-01	NULL	true	true
+5	true	NULL	2026-01-01 00:00:00	2027-01-01 00:00:00	NULL	true	true
+6	true	NULL	1.25	99.99	NULL	true	true
+7	true	NULL	0	1	NULL	true	true
+
+# the table stats and the files match as well, by the order of the files
+query I
+SELECT count(*) FROM (
+  (SELECT * EXCLUDE (table_id) FROM postgres_query('pg', 'SELECT s.* FROM pipeline_stats.ducklake_table_stats s
+     JOIN pipeline_stats.ducklake_table t USING (table_id) WHERE t.table_name = ''client'''))
+  EXCEPT
+  (SELECT * EXCLUDE (table_id) FROM postgres_query('pg', 'SELECT s.* FROM pipeline_stats.ducklake_table_stats s
+     JOIN pipeline_stats.ducklake_table t USING (table_id) WHERE t.table_name = ''server'''))
+)
+----
+0
+
+query I
+SELECT count(*) FROM (
+  (SELECT * FROM postgres_query('pg', 'SELECT row_number() OVER (ORDER BY f.data_file_id) AS n, f.record_count,
+     f.row_id_start, c.column_id, c.value_count, c.null_count, c.min_value, c.max_value, c.contains_nan, c.min_is_exact,
+     c.max_is_exact FROM pipeline_stats.ducklake_data_file f JOIN pipeline_stats.ducklake_table t USING (table_id)
+     JOIN pipeline_stats.ducklake_file_column_stats c USING (data_file_id) WHERE t.table_name = ''client'''))
+  EXCEPT
+  (SELECT * FROM postgres_query('pg', 'SELECT row_number() OVER (ORDER BY f.data_file_id) AS n, f.record_count,
+     f.row_id_start, c.column_id, c.value_count, c.null_count, c.min_value, c.max_value, c.contains_nan, c.min_is_exact,
+     c.max_is_exact FROM pipeline_stats.ducklake_data_file f JOIN pipeline_stats.ducklake_table t USING (table_id)
+     JOIN pipeline_stats.ducklake_file_column_stats c USING (data_file_id) WHERE t.table_name = ''server'''))
+)
+----
+0

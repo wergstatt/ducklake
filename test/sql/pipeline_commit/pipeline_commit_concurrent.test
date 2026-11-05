@@ -1,0 +1,66 @@
+# name: test/sql/pipeline_commit/pipeline_commit_concurrent.test
+# description: concurrent commits of new data files get their ids on the server and need no retry
+# group: [pipeline_commit]
+
+require ducklake
+
+require parquet
+
+require postgres_scanner
+
+require-env DUCKLAKE_CI
+
+require-env DUCKLAKE_CONNECTION postgres:dbname=ducklakedb
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH '{DUCKLAKE_CONNECTION}' AS pg
+
+statement ok
+CALL postgres_execute('pg', 'DROP SCHEMA IF EXISTS pipeline_concurrent CASCADE')
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/pipeline_concurrent',
+  METADATA_SCHEMA 'pipeline_concurrent', DATA_INLINING_ROW_LIMIT 0,
+  METADATA_PARAMETERS MAP {'isolation_level': 'read committed'})
+
+statement ok
+SET GLOBAL ducklake_postgres_pipeline_commit = true
+
+statement ok
+CREATE TABLE dl.t (i INTEGER)
+
+statement ok
+INSERT INTO dl.t VALUES (-1)
+
+# a commit that lost a race would fail without retries
+statement ok
+SET GLOBAL ducklake_max_retry_count = 0
+
+concurrentloop i 0 8
+
+query I
+INSERT INTO dl.t VALUES ({i})
+----
+1
+
+endloop
+
+query III
+SELECT count(*), min(i), max(i) FROM dl.t
+----
+9	-1	7
+
+# the ids follow the order of the commits: no gaps, and each commit continues the row ids of the last
+query IIII
+SELECT count(*), max(snapshot_id) - min(snapshot_id), sum(record_count), max(row_id_start)
+FROM postgres_query('pg', 'SELECT f.begin_snapshot AS snapshot_id, f.record_count, f.row_id_start
+  FROM pipeline_concurrent.ducklake_data_file f')
+----
+9	8	9	8
+
+query I
+SELECT next_row_id FROM postgres_query('pg', 'SELECT next_row_id FROM pipeline_concurrent.ducklake_table_stats')
+----
+9

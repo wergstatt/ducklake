@@ -2359,6 +2359,29 @@ unique_ptr<QueryResult> DuckLakeTransaction::ExecuteRaw(string query) {
 	return std::move(result);
 }
 
+unique_ptr<QueryResult> DuckLakeTransaction::ExecuteRaw(string query, vector<Value> parameters) {
+	auto &connection = GetConnection();
+	auto start = std::chrono::steady_clock::now();
+	auto prepared = connection.Prepare(query);
+	auto result =
+	    prepared->HasError() ? make_uniq<QueryResult>(prepared->GetErrorObject()) : prepared->Execute(parameters);
+	ReportMetadataQuery(query, std::chrono::steady_clock::now() - start);
+	return result;
+}
+
+bool DuckLakeTransaction::ChangesConfigOptions() const {
+	return !config_option_undo.empty();
+}
+
+void DuckLakeTransaction::RestartMetadataTransaction() {
+	auto &connection = GetConnection();
+	if (connection.context->transaction.HasActiveTransaction()) {
+		connection.Rollback();
+	}
+	metadata_manager->ClearCache();
+	connection.BeginTransaction();
+}
+
 unique_ptr<QueryResult> DuckLakeTransaction::ExecuteStatement(unique_ptr<SQLStatement> statement) {
 	auto &connection = GetConnection();
 	auto query = statement->query;

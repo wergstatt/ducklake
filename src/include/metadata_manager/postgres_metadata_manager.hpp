@@ -47,6 +47,10 @@ public:
 	string ConfigOptionLockSql() const override;
 
 	unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, string &query) override;
+	bool CanSkipSnapshotFetch(const TransactionChangeInformation &changes) const override;
+	void FlushChangesServerSide(DuckLakeTransaction &transaction, DuckLakeSnapshot transaction_snapshot,
+	                            const TransactionChangeInformation &transaction_changes,
+	                            const DuckLakeRetryConfig &retry_config) override;
 	unique_ptr<QueryResult> ExecuteDropInTransaction(string &query) override;
 
 	void ClearCache() override;
@@ -69,6 +73,16 @@ protected:
 	bool MaterializeStatsCTEs() const override;
 	string CastValueToTarget(const Value &value, const LogicalType &type) override;
 	string CastStatsToTarget(const string &stats, const LogicalType &type, StatsCastType cast_type) override;
+
+private:
+	//! Whether a failed pipeline commit falls back to the client-side commit
+	bool RetriesOnClient(const string &message) const;
+	//! The statements of a commit of new data files that resolves its ids and stats on the server, empty if the
+	//! commit needs the client-side path. snapshot_statement is the statement that returns the new snapshot id
+	vector<Value> PipelineCommitStatements(DuckLakeSnapshot transaction_snapshot,
+	                                       const TransactionChangeInformation &changes, idx_t &snapshot_statement);
+	//! The expression that orders the bounds of a type on the server, empty if the server cannot merge them
+	string BoundOrderExpression(const string &bound, const LogicalType &type);
 };
 
 } // namespace duckdb

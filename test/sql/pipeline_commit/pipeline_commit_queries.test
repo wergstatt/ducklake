@@ -1,0 +1,77 @@
+# name: test/sql/pipeline_commit/pipeline_commit_queries.test
+# description: a commit of new data files on PostgreSQL sends its statements as one pipeline, with values as parameters
+# group: [pipeline_commit]
+
+require ducklake
+
+require parquet
+
+require postgres_scanner
+
+require-env DUCKLAKE_CI
+
+require-env DUCKLAKE_CONNECTION postgres:dbname=ducklakedb
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH '{DUCKLAKE_CONNECTION}' AS pg
+
+statement ok
+CALL postgres_execute('pg', 'DROP SCHEMA IF EXISTS pipeline_queries CASCADE')
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/pipeline_queries',
+  METADATA_SCHEMA 'pipeline_queries', DATA_INLINING_ROW_LIMIT 0,
+  METADATA_PARAMETERS MAP {'isolation_level': 'read committed'})
+
+statement ok
+SET ducklake_postgres_pipeline_commit = true
+
+statement ok
+CREATE TABLE dl.t (i INTEGER, s VARCHAR)
+
+# the first insert creates the stats of the table, which the client-side commit writes
+statement ok
+INSERT INTO dl.t VALUES (1, 'b')
+
+statement ok
+CALL enable_logging('PostgresQueryLog', level = 'debug', storage = 'memory')
+
+statement ok
+INSERT INTO dl.t VALUES (2, 'a'), (3, NULL)
+
+statement ok
+CALL disable_logging()
+
+# after the read of the latest snapshot, one pipeline commits, and no value of the data is in the statements
+query II
+SELECT row_number() OVER () AS n, left(parse_duckdb_log_message('PostgresQueryLog', message).query, 70)
+FROM duckdb_logs() WHERE type = 'PostgresQueryLog'
+----
+1	BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED
+2	COPY (SELECT snapshot_id, schema_version, next_catalog_id, next_file_i
+3	SET LOCAL lock_timeout = '1s'
+4	SET LOCAL idle_in_transaction_session_timeout = '10s'
+5	SELECT pg_advisory_xact_lock(hashtext($1))
+6	INSERT INTO "pipeline_queries".ducklake_snapshot SELECT CASE WHEN EXIS
+7	INSERT INTO "pipeline_queries".ducklake_data_file SELECT s.next_file_i
+8	INSERT INTO "pipeline_queries".ducklake_file_column_stats SELECT s.nex
+9	UPDATE "pipeline_queries".ducklake_table_column_stats g SET contains_n
+10	UPDATE "pipeline_queries".ducklake_table_column_stats g SET contains_n
+11	UPDATE "pipeline_queries".ducklake_table_stats ts SET record_count = t
+12	INSERT INTO "pipeline_queries".ducklake_snapshot_changes SELECT s.snap
+13	COMMIT
+
+query II
+FROM dl.t ORDER BY i
+----
+1	b
+2	a
+3	NULL
+
+query IIIIIIII
+SELECT * EXCLUDE (extra_stats) FROM postgres_query('pg', 'SELECT * FROM pipeline_queries.ducklake_table_column_stats ORDER BY column_id')
+----
+1	1	false	NULL	1	3	true	true
+1	2	true	NULL	a	b	true	true

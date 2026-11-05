@@ -207,6 +207,12 @@ public:
 	DuckLakeSnapshotCommit &GetCommitInfo();
 	//! Execute SQL on the metadata connection without placeholder substitution or metadata-manager wrapping.
 	unique_ptr<QueryResult> ExecuteRaw(string query);
+	//! As above, with values for the parameters of the query, which the log leaves out
+	unique_ptr<QueryResult> ExecuteRaw(string query, vector<Value> parameters);
+	//! Rolls back the metadata transaction of a failed commit and begins a new one, keeping the snapshot
+	void RestartMetadataTransaction();
+	//! Whether the transaction changed config options
+	bool ChangesConfigOptions() const;
 	//! Execute a statement on the metadata connection, logged with its query text like ExecuteRaw.
 	unique_ptr<QueryResult> ExecuteStatement(unique_ptr<SQLStatement> statement);
 	Connection &GetConnection();

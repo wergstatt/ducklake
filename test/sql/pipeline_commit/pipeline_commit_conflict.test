@@ -1,0 +1,89 @@
+# name: test/sql/pipeline_commit/pipeline_commit_conflict.test
+# description: a pipeline commit that a concurrent change conflicts with falls back to the client-side commit
+# group: [pipeline_commit]
+
+require ducklake
+
+require parquet
+
+require postgres_scanner
+
+require-env DUCKLAKE_CI
+
+require-env DUCKLAKE_CONNECTION postgres:dbname=ducklakedb
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH '{DUCKLAKE_CONNECTION}' AS pg
+
+statement ok
+CALL postgres_execute('pg', 'DROP SCHEMA IF EXISTS pipeline_conflict CASCADE')
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/pipeline_conflict',
+  METADATA_SCHEMA 'pipeline_conflict', DATA_INLINING_ROW_LIMIT 0,
+  METADATA_PARAMETERS MAP {'isolation_level': 'read committed'})
+
+statement ok
+SET GLOBAL ducklake_postgres_pipeline_commit = true
+
+statement ok
+CREATE TABLE dl.t (i INTEGER)
+
+statement ok
+INSERT INTO dl.t VALUES (1)
+
+statement ok con1
+BEGIN
+
+statement ok con1
+INSERT INTO dl.t VALUES (2)
+
+statement ok con2
+ALTER TABLE dl.t ADD COLUMN j INTEGER
+
+statement error con1
+COMMIT
+----
+Transaction conflict
+
+statement ok con1
+BEGIN
+
+statement ok con1
+INSERT INTO dl.t VALUES (3, 3)
+
+statement ok con2
+DROP TABLE dl.t
+
+statement error con1
+COMMIT
+----
+Transaction conflict
+
+# a concurrent insert into the same table is no conflict
+statement ok
+CREATE TABLE dl.u (i INTEGER)
+
+statement ok
+INSERT INTO dl.u VALUES (1)
+
+statement ok con1
+BEGIN
+
+statement ok con1
+INSERT INTO dl.u VALUES (2)
+
+statement ok con2
+INSERT INTO dl.u VALUES (3)
+
+statement ok con1
+COMMIT
+
+query I
+SELECT i FROM dl.u ORDER BY i
+----
+1
+2
+3
