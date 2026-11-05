@@ -4,6 +4,7 @@
 #include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_transaction.hpp"
 #include "storage/ducklake_metadata_info.hpp"
+#include "storage/ducklake_metadata_schema.hpp"
 #include "storage/ducklake_table_entry.hpp"
 #include "common/ducklake_types.hpp"
 #include "duckdb/common/type_visitor.hpp"
@@ -545,15 +546,23 @@ void PostgresMetadataManager::ClearCache() {
 	auto &catalog = transaction.GetCatalog();
 	if (catalog.ScopedCacheClear()) {
 		auto catalog_literal = SQLString::ToString(catalog.MetadataDatabaseName().GetIdentifierName());
-		auto result = transaction.ExecuteRaw(StringUtil::Format(
-		    "SELECT * FROM postgres_query(%s, 'SELECT 1', clear_catalog_cache = true);", catalog_literal));
-		if (!result->HasError()) {
-			return;
+		// without a round trip, or with one on a postgres_scanner from before the catalog option
+		vector<pair<string, string>> scoped_clears {
+		    {StringUtil::Format("CALL postgres_clear_cache(catalog := %s);", catalog_literal), "catalog"},
+		    {StringUtil::Format("SELECT * FROM postgres_query(%s, 'SELECT 1', clear_catalog_cache = true);",
+		                        catalog_literal),
+		     "clear_catalog_cache"}};
+		for (auto &scoped_clear : scoped_clears) {
+			auto result = transaction.ExecuteRaw(scoped_clear.first);
+			if (!result->HasError()) {
+				return;
+			}
+			// the error of a postgres_scanner from before the option
+			if (!StringUtil::Contains(result->GetError(), "Invalid named parameter \"" + scoped_clear.second + "\"")) {
+				result->ThrowIfError("Failed to clear the PostgreSQL metadata cache: ");
+			}
 		}
-		// the error of a postgres_scanner from before the option, which can only clear every catalog
-		if (!StringUtil::Contains(result->GetError(), "Invalid named parameter \"clear_catalog_cache\"")) {
-			result->ThrowIfError("Failed to clear the PostgreSQL metadata cache: ");
-		}
+		// a postgres_scanner from before both options can only clear every catalog
 		catalog.SetScopedCacheClear(false);
 	}
 	auto result = transaction.ExecuteRaw("CALL postgres_clear_cache();");
@@ -562,8 +571,100 @@ void PostgresMetadataManager::ClearCache() {
 
 static string PostgresQuery(const string &remote_query) {
 	// the query runs at bind, which saves the round trip that describes it
-	return StringUtil::Format("SELECT * FROM postgres_query({METADATA_CATALOG_NAME_LITERAL}, %s, execute_in_bind := true)",
-	                          SQLString(remote_query));
+	return StringUtil::Format(
+	    "SELECT * FROM postgres_query({METADATA_CATALOG_NAME_LITERAL}, %s, execute_in_bind := true)",
+	    SQLString(remote_query));
+}
+
+//! The metadata tables that the catalog of a snapshot is built from
+static const vector<string> &CatalogTables() {
+	static const vector<string> tables {"ducklake_schema",
+	                                    "ducklake_table",
+	                                    "ducklake_tag",
+	                                    "ducklake_inlined_data_tables",
+	                                    "ducklake_column",
+	                                    "ducklake_column_tag",
+	                                    "ducklake_view",
+	                                    "ducklake_view_column_tag",
+	                                    "ducklake_macro",
+	                                    "ducklake_macro_impl",
+	                                    "ducklake_macro_parameters",
+	                                    "ducklake_partition_info",
+	                                    "ducklake_partition_column",
+	                                    "ducklake_sort_info",
+	                                    "ducklake_sort_expression"};
+	return tables;
+}
+
+DuckLakeCatalogInfo PostgresMetadataManager::GetCatalogForSnapshot(DuckLakeSnapshot snapshot) {
+	auto &catalog = transaction.GetCatalog();
+	auto version = catalog.GetDuckLakeVersion();
+	// one round trip reads every column of the tables that the catalog is built from, as an array per column
+	// the rows go to temporary tables of fixed names, so loads on the connection take turns
+	static mutex load_lock;
+	lock_guard<mutex> guard(load_lock);
+	string local_prefix = "temp.main.";
+	vector<string> remote_tables;
+	string local_tables;
+	for (auto &table : CatalogTables()) {
+		vector<pair<string, string>> columns;
+		auto names = DuckLakeMetadataSchema::HasTable(table, version)
+		                 ? DuckLakeMetadataSchema::ColumnNames(table, version)
+		                 : vector<string>();
+		for (auto &column : DuckLakeMetadataSchema::ColumnTypes(table)) {
+			if (std::find(names.begin(), names.end(), column.first) != names.end()) {
+				columns.push_back(column);
+			}
+		}
+		if (columns.empty()) {
+			// a table that the version does not have is empty
+			local_tables += StringUtil::Format("CREATE OR REPLACE TEMP TABLE %s%s (%s);\n", local_prefix, table,
+			                                   StringUtil::Join(DuckLakeMetadataSchema::ColumnTypes(table),
+			                                                    DuckLakeMetadataSchema::ColumnTypes(table).size(), ", ",
+			                                                    [](const pair<string, string> &column) {
+				                                                    return column.first + " " + column.second;
+			                                                    }));
+			continue;
+		}
+		vector<string> arrays, rows;
+		bool versioned = false;
+		for (auto &column : columns) {
+			arrays.push_back(
+			    StringUtil::Format("array_agg(t.%s ORDER BY t.ctid) AS %s__%s", column.first, table, column.first));
+			rows.push_back(StringUtil::Format("unnest(%s__%s) AS %s", table, column.first, column.first));
+			versioned = versioned || column.first == "end_snapshot";
+		}
+		auto filter = versioned ? " WHERE {SNAPSHOT_ID} >= t.begin_snapshot AND ({SNAPSHOT_ID} < t.end_snapshot OR "
+		                          "t.end_snapshot IS NULL)"
+		                        : "";
+		remote_tables.push_back(StringUtil::Format("(SELECT %s FROM {METADATA_CATALOG}.%s t%s) %s",
+		                                           StringUtil::Join(arrays, ", "), table, filter, table));
+		// the catalog queries read the rows from temporary tables of the same name
+		local_tables +=
+		    StringUtil::Format("CREATE OR REPLACE TEMP TABLE %s%s AS SELECT %s FROM __ducklake_catalog_rows;\n",
+		                       local_prefix, table, StringUtil::Join(rows, ", "));
+	}
+	string remote_query = "SELECT * FROM " + StringUtil::Join(remote_tables, " CROSS JOIN ");
+	SubstituteTransactionPlaceholders(snapshot, remote_query);
+	SubstituteCatalogPlaceholders(remote_query, SQLQuotedIdentifier::ToString(catalog.MetadataSchemaName()));
+	auto query = "CREATE OR REPLACE TEMP TABLE __ducklake_catalog_rows AS " + PostgresQuery(remote_query) + ";\n" +
+	             local_tables + "DROP TABLE __ducklake_catalog_rows;\n";
+	auto result = Query(snapshot, query);
+	result->ThrowIfError("Failed to read the catalog from DuckLake: ");
+	auto catalog_info = BuildCatalogForSnapshot(
+	    snapshot,
+	    [this](DuckLakeSnapshot s, string q) {
+		    SubstituteTransactionPlaceholders(s, q);
+		    SubstituteCatalogPlaceholders(q, "temp.main");
+		    return transaction.ExecuteRaw(q);
+	    },
+	    catalog.DataPath(), catalog.Separator(), catalog.SupportsV1_1Metadata());
+	string drops;
+	for (auto &table : CatalogTables()) {
+		drops += "DROP TABLE " + local_prefix + table + ";\n";
+	}
+	Query(snapshot, drops)->ThrowIfError("Failed to read the catalog from DuckLake: ");
+	return catalog_info;
 }
 
 string PostgresMetadataManager::GetLatestSnapshotQuery() const {

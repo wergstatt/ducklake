@@ -56,13 +56,12 @@ USE ducklake
 # Every scan of ducklake_column sent to Postgres has the snapshot filter of a loaded catalog
 query I
 SELECT CASE WHEN (SELECT catalog_type FROM settings()) = 'postgres' THEN
-	(SELECT bool_or(contains(query, printf('"begin_snapshot" <= %d AND ("end_snapshot" > %d OR "end_snapshot" IS NULL)',
+	(SELECT bool_or(contains(query, printf('ducklake_column t WHERE %d >= t.begin_snapshot AND (%d < t.end_snapshot OR t.end_snapshot IS NULL)',
 	                                       getvariable('latest'), getvariable('latest'))))
-	    AND bool_or(contains(query, printf('"begin_snapshot" <= %d AND ("end_snapshot" > %d OR "end_snapshot" IS NULL)',
+	    AND bool_or(contains(query, printf('ducklake_column t WHERE %d >= t.begin_snapshot AND (%d < t.end_snapshot OR t.end_snapshot IS NULL)',
 	                                       getvariable('with_x'), getvariable('with_x'))))
-	    AND bool_and(contains(query, '"begin_snapshot" <= '))
 	 FROM (SELECT message AS query FROM duckdb_logs WHERE type = 'PostgresQueryLog') logs
-	 WHERE contains(query, '"ducklake_column" '))
+	 WHERE contains(query, 'ducklake_column t '))
 	ELSE true END
 ----
 true

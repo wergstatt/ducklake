@@ -325,4 +325,18 @@ vector<string> DuckLakeMetadataSchema::ColumnNames(const string &table_name) {
 	return names;
 }
 
+vector<pair<string, string>> DuckLakeMetadataSchema::ColumnTypes(const string &table_name) {
+	vector<pair<string, string>> result;
+	for (auto &column : GetMetadataTable(table_name).columns) {
+		// the type is the first word of the definition, before constraints such as PRIMARY KEY
+		auto definition = string(column.definition);
+		result.emplace_back(column.name, definition.substr(0, definition.find(' ')));
+	}
+	return result;
+}
+
+bool DuckLakeMetadataSchema::HasTable(const string &table_name, DuckLakeVersion version) {
+	return GetMetadataTable(table_name).added_in <= version;
+}
+
 } // namespace duckdb

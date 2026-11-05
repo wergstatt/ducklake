@@ -9,6 +9,9 @@
 #pragma once
 
 #include "common/ducklake_version.hpp"
+#include "duckdb/common/pair.hpp"
+#include "duckdb/common/string.hpp"
+#include "duckdb/common/vector.hpp"
 
 namespace duckdb {
 
@@ -47,6 +50,10 @@ public:
 	static vector<string> ColumnNames(const string &table_name, DuckLakeVersion version);
 	//! The columns of a metadata table whose columns are the same in every version that has it
 	static vector<string> ColumnNames(const string &table_name);
+	//! The names and types of the columns of a metadata table in its latest version
+	static vector<pair<string, string>> ColumnTypes(const string &table_name);
+	//! Whether a version has the metadata table
+	static bool HasTable(const string &table_name, DuckLakeVersion version);
 };
 
 } // namespace duckdb

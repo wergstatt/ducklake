@@ -47,6 +47,7 @@ public:
 	string ConfigOptionLockSql() const override;
 
 	unique_ptr<QueryResult> Execute(DuckLakeBatch &batch) override;
+	DuckLakeCatalogInfo GetCatalogForSnapshot(DuckLakeSnapshot snapshot) override;
 	unique_ptr<QueryResult> ExecuteAndCommit(DuckLakeSnapshot snapshot, DuckLakeBatch &batch) override;
 	//! The expression that orders the bounds of a type on the server, empty if the server cannot merge them
 	string BoundOrderExpression(const string &bound, const LogicalType &type);
