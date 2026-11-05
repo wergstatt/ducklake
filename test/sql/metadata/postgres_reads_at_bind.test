@@ -1,0 +1,34 @@
+# name: test/sql/metadata/postgres_reads_at_bind.test
+# description: a raw metadata read on PostgreSQL runs at bind, in one request instead of a description and a COPY
+# group: [metadata]
+
+require ducklake
+
+require parquet
+
+require postgres_scanner
+
+require-env DUCKLAKE_CI
+
+require-env DUCKLAKE_CONNECTION
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/postgres_reads_at_bind')
+
+statement ok
+CALL enable_logging('PostgresQueryLog', storage = 'memory')
+
+statement ok
+FROM dl.snapshots()
+
+# the snapshot read reaches the server once, as a query of its own and not as a COPY
+query I
+SELECT count(*) FILTER (WHERE NOT contains(query, 'COPY')) = 1 AND count(*) = 1
+  OR NOT EXISTS (SELECT 1 FROM duckdb_functions() WHERE function_name = 'postgres_query'
+                 AND list_contains(parameters, 'execute_in_bind'))
+FROM duckdb_logs_parsed('PostgresQueryLog')
+WHERE contains(query, 'MAX(snapshot_id)')
+----
+true

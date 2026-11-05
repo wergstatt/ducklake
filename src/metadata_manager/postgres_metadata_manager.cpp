@@ -9,6 +9,8 @@
 #include "duckdb/common/type_visitor.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
 #include "duckdb/common/vector/struct_vector.hpp"
+#include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 
 namespace duckdb {
 
@@ -529,16 +531,31 @@ void PostgresMetadataManager::ClearCache() {
 	result->ThrowIfError("Failed to clear the PostgreSQL metadata cache: ");
 }
 
-static string PostgresQuery(const string &remote_query) {
-	return StringUtil::Format("SELECT * FROM postgres_query({METADATA_CATALOG_NAME_LITERAL}, %s)",
-	                          SQLString(remote_query));
+//! Whether postgres_query can run a query at bind, which saves the round trip that describes it
+static bool QueriesRunAtBind(ClientContext &context) {
+	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
+	auto &schema = Catalog::GetSystemCatalog(context).GetSchema(transaction, Identifier::DefaultSchema());
+	auto entry = schema.GetEntry(transaction, CatalogType::TABLE_FUNCTION_ENTRY, Identifier("postgres_query"));
+	if (!entry) {
+		return false;
+	}
+	auto &functions = entry->Cast<TableFunctionCatalogEntry>().functions.functions;
+	return std::any_of(functions.begin(), functions.end(), [](const shared_ptr<const TableFunction> &function) {
+		auto options = function->GetSignature().GetTypedKwargs();
+		return options && options->Find(Identifier("execute_in_bind"));
+	});
+}
+
+static string PostgresQuery(ClientContext &context, const string &remote_query) {
+	return StringUtil::Format("SELECT * FROM postgres_query({METADATA_CATALOG_NAME_LITERAL}, %s%s)",
+	                          SQLString(remote_query), QueriesRunAtBind(context) ? ", execute_in_bind := true" : "");
 }
 
 string PostgresMetadataManager::GetLatestSnapshotQuery() const {
 	auto remote_query = LatestSnapshotQuery();
 	SubstituteCatalogPlaceholders(remote_query,
 	                              SQLQuotedIdentifier::ToString(transaction.GetCatalog().MetadataSchemaName()));
-	return PostgresQuery(remote_query);
+	return PostgresQuery(*transaction.GetConnection().context, remote_query);
 }
 
 string PostgresMetadataManager::GetSnapshotAndStatsAndChangesQuery(DuckLakeSnapshot snapshot,
@@ -548,7 +565,7 @@ string PostgresMetadataManager::GetSnapshotAndStatsAndChangesQuery(DuckLakeSnaps
 	SubstituteCatalogPlaceholders(remote_query,
 	                              SQLQuotedIdentifier::ToString(transaction.GetCatalog().MetadataSchemaName()));
 	SubstituteSnapshotPlaceholders(snapshot, remote_query);
-	return PostgresQuery(remote_query);
+	return PostgresQuery(*transaction.GetConnection().context, remote_query);
 }
 
 bool PostgresMetadataManager::MaterializeStatsCTEs() const {
@@ -566,7 +583,7 @@ string PostgresMetadataManager::GenerateFileListQuery(DuckLakeTableEntry &table,
 	    table, snapshot, filter_info, dynamic_filters, runtime_filter_stats_columns, file_list_type, schema);
 	// placeholders inside the literal are not replaced later
 	SubstituteSnapshotPlaceholders(snapshot, remote_query);
-	return PostgresQuery(remote_query);
+	return PostgresQuery(*transaction.GetConnection().context, remote_query);
 }
 
 } // namespace duckdb
