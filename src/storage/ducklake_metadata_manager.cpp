@@ -302,7 +302,8 @@ INSERT INTO {METADATA_CATALOG}.ducklake_schema (schema_id, schema_uuid, begin_sn
 	)",
 	                                       GetVersionString(), DuckDB::SourceID(), SQLString(data_path), encryption_str,
 	                                       initial_schema_uuid);
-	auto result = Execute(initialize_query);
+	// with a snapshot Postgres runs the batch on the server, instead of looking up each table as DuckDB binds it
+	auto result = Execute(DuckLakeSnapshot(), initialize_query);
 	result->ThrowIfError("Failed to initialize DuckLake: ");
 }
 
