@@ -32,6 +32,12 @@
       ]
     },
     {
+      "reason": "Quack commits each statement, so the commit of an expiry reads the latest snapshot again",
+      "paths": [
+        "test/sql/compaction/expire_snapshots_read_latest_once.test"
+      ]
+    },
+    {
       "reason": "Quack commits each statement, so a cached timestamp is checked again for concurrent expiries",
       "paths": [
         "test/sql/time_travel/at_timestamp_cached_no_rescan.test"
