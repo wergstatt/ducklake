@@ -2968,18 +2968,62 @@ WHERE data.data_file_id IN (%s)
 	}
 }
 
-vector<DuckLakeCompactionFileEntry> DuckLakeMetadataManager::GetFilesForCompaction(DuckLakeTableEntry &table,
-                                                                                   CompactionType type,
-                                                                                   double deletion_threshold,
-                                                                                   DuckLakeSnapshot snapshot,
-                                                                                   DuckLakeFileSizeOptions options) {
+void DuckLakeMetadataManager::AddFilesForCompactionReads(DuckLakeReadBatch &reads, DuckLakeTableEntry &table,
+                                                         CompactionType type, DuckLakeSnapshot snapshot,
+                                                         DuckLakeFileSizeOptions options,
+                                                         const map<idx_t, set<idx_t>> &inlined_deletions) {
 	auto table_id = table.GetTableId();
-	// Determine the effective max file size threshold for filtering
-	idx_t effective_max_file_size =
-	    options.max_file_size.IsValid() ? options.max_file_size.GetIndex() : options.target_file_size;
+	// the schema versions of the table, which give each file the version it was written with
+	reads.Add({R"(
+SELECT schema_version, begin_snapshot
+FROM {METADATA_CATALOG}.ducklake_schema_versions
+WHERE table_id = $1
+ORDER BY begin_snapshot ASC)",
+	           {Value::UBIGINT(table_id.index)}});
+
+	DuckLakeStatement data_filter {"data.table_id = $1 AND data.end_snapshot IS NULL", {Value::UBIGINT(table_id.index)}};
+	string delete_file_filter;
+	if (type == CompactionType::MERGE_ADJACENT_TABLES) {
+		// Determine the effective max file size threshold for filtering
+		idx_t effective_max_file_size =
+		    options.max_file_size.IsValid() ? options.max_file_size.GetIndex() : options.target_file_size;
+		if (options.min_file_size.IsValid()) {
+			data_filter.Append({" AND data.file_size_bytes >= $1", {Value::UBIGINT(options.min_file_size.GetIndex())}});
+		}
+		data_filter.Append({" AND data.file_size_bytes < $1", {Value::UBIGINT(effective_max_file_size)}});
+		// filter on snapshot ids (commit order), not snapshot_time (transaction start), so late commits count as newer
+		auto first_snapshot_at = [](const string &comparison, const Value &timestamp) {
+			auto timestamp_tz = timestamp.GetValue<timestamp_tz_t>();
+			auto timestamp_filter = DuckLakeTableFunctionUtil::FormatTimestampISO8601(timestamp_t(timestamp_tz.value));
+			return DuckLakeStatement {" AND data.begin_snapshot " + comparison +
+			                              " (SELECT COALESCE(MIN(snapshot_id), 9223372036854775807) FROM "
+			                              "{METADATA_CATALOG}.ducklake_snapshot WHERE CAST(snapshot_time AS TIMESTAMPTZ) >= $1)",
+			                          {Value(timestamp_filter)}};
+		};
+		if (!options.newer_than.IsNull()) {
+			data_filter.Append(first_snapshot_at(">=", options.newer_than));
+		}
+		if (!options.older_than.IsNull()) {
+			data_filter.Append(first_snapshot_at("<", options.older_than));
+		}
+	} else if (type == CompactionType::REWRITE_DELETES) {
+		// the files with live deletes, in delete files or inlined
+		data_filter.sql += R"( AND (data.data_file_id IN (
+	SELECT data_file_id FROM {METADATA_CATALOG}.ducklake_delete_file WHERE table_id = $1 AND end_snapshot IS NULL
+))";
+		if (!inlined_deletions.empty()) {
+			data_filter.Append(
+			    {StringUtil::Format(" OR data.data_file_id IN (SELECT file_id FROM {METADATA_CATALOG}.%s WHERE "
+			                        "begin_snapshot <= $1)",
+			                        InlinedFileDeletionTableName(table_id)),
+			     {Value::UBIGINT(snapshot.snapshot_id)}});
+		}
+		data_filter.sql += ")";
+		delete_file_filter = " AND del.end_snapshot IS NULL";
+	}
+
 	string data_select_list = "data.data_file_id, data.record_count, data.row_id_start, data.begin_snapshot, "
-	                          "data.end_snapshot, data.mapping_id, sr.schema_version , data.partial_max, "
-	                          "data.partition_id, partition_info.keys, " +
+	                          "data.end_snapshot, data.mapping_id, data.partial_max, data.partition_id, " +
 	                          GetDataFileSelectList("data");
 	string delete_select_list = "del.data_file_id AS del_data_file_id,"
 	                            "del.delete_file_id AS del_delete_file_id, "
@@ -2988,106 +3032,59 @@ vector<DuckLakeCompactionFileEntry> DuckLakeMetadataManager::GetFilesForCompacti
 	                            "del.end_snapshot AS del_end_snapshot, "
 	                            "del.partial_max AS del_partial_max, " +
 	                            GetDeleteFileSelectList("del");
-	string select_list = data_select_list + ", " + delete_select_list;
+	DuckLakeStatement files {StringUtil::Format(R"(
+SELECT %s, %s
+FROM {METADATA_CATALOG}.ducklake_data_file data
+LEFT JOIN {METADATA_CATALOG}.ducklake_delete_file del
+	ON del.data_file_id = data.data_file_id%s
+WHERE )",
+	                                            data_select_list, delete_select_list, delete_file_filter),
+	                         {}};
+	files.Append(data_filter);
+	files.sql += "\nORDER BY data.begin_snapshot ASC, data.row_id_start ASC, data.data_file_id ASC, del.begin_snapshot ASC";
+	reads.Add(std::move(files));
 
-	string candidate_files_cte;
-	string data_file_source = "{METADATA_CATALOG}.ducklake_data_file data";
-	string delete_file_filter;
-	string file_filter_clause = " AND data.end_snapshot IS NULL";
-	auto partition_value_filter = StringUtil::Format("\n\tWHERE table_id=%d", table_id.index);
+	DuckLakeStatement partition_values {R"(
+SELECT pv.data_file_id, pv.partition_value
+FROM {METADATA_CATALOG}.ducklake_file_partition_value pv
+JOIN {METADATA_CATALOG}.ducklake_data_file data ON data.data_file_id = pv.data_file_id
+WHERE )",
+	                                    {}};
+	partition_values.Append(data_filter);
+	partition_values.sql += "\nORDER BY pv.data_file_id ASC, pv.partition_key_index ASC";
+	reads.Add(std::move(partition_values));
+}
 
-	map<idx_t, set<idx_t>> inlined_deletions;
-
-	// Add file filtering for MERGE_ADJACENT_TABLES compaction
-	if (type == CompactionType::MERGE_ADJACENT_TABLES) {
-		if (options.min_file_size.IsValid()) {
-			file_filter_clause +=
-			    StringUtil::Format(" AND data.file_size_bytes >= %llu", options.min_file_size.GetIndex());
+vector<DuckLakeCompactionFileEntry>
+DuckLakeMetadataManager::GetFilesForCompaction(DuckLakeTableEntry &table, CompactionType type,
+                                               double deletion_threshold, DuckLakeSnapshot snapshot,
+                                               map<idx_t, set<idx_t>> inlined_deletions,
+                                               vector<unique_ptr<QueryResult>>::iterator results) {
+	auto table_id = table.GetTableId();
+	auto &schema_versions_result = **results++;
+	auto &files_result = **results++;
+	auto &partition_values_result = **results;
+	schema_versions_result.ThrowIfError("Failed to get compaction file list from DuckLake: ");
+	files_result.ThrowIfError("Failed to get compaction file list from DuckLake: ");
+	partition_values_result.ThrowIfError("Failed to get compaction file list from DuckLake: ");
+	// the schema versions by the snapshot they begin at
+	map<idx_t, idx_t> schema_versions;
+	auto &catalog = transaction.GetCatalog();
+	for (auto &row : schema_versions_result) {
+		auto schema_version = row.GetValue<idx_t>(0);
+		auto begin_snapshot = row.GetValue<idx_t>(1);
+		schema_versions[begin_snapshot] = schema_version;
+		// as GetBeginSnapshotForSchemaVersion, only committed rows
+		if (!transaction.ChangesMade()) {
+			catalog.CacheSchemaVersionBeginSnapshot(table_id, schema_version, begin_snapshot);
 		}
-		file_filter_clause += StringUtil::Format(" AND data.file_size_bytes < %llu", effective_max_file_size);
-		// filter on snapshot ids (commit order), not snapshot_time (transaction start), so late commits count as newer
-		auto first_snapshot_at = [](const Value &timestamp) {
-			auto timestamp_tz = timestamp.GetValue<timestamp_tz_t>();
-			auto timestamp_filter = DuckLakeTableFunctionUtil::FormatTimestampISO8601(timestamp_t(timestamp_tz.value));
-			return StringUtil::Format("(SELECT COALESCE(MIN(snapshot_id), 9223372036854775807) FROM "
-			                          "{METADATA_CATALOG}.ducklake_snapshot WHERE snapshot_time::TIMESTAMPTZ >= '%s')",
-			                          timestamp_filter);
-		};
-		if (!options.newer_than.IsNull()) {
-			file_filter_clause += " AND data.begin_snapshot >= " + first_snapshot_at(options.newer_than);
-		}
-		if (!options.older_than.IsNull()) {
-			file_filter_clause += " AND data.begin_snapshot < " + first_snapshot_at(options.older_than);
-		}
-	} else if (type == CompactionType::REWRITE_DELETES) {
-		// Load inlined row IDs before selecting rewrite candidates.
-		inlined_deletions = ReadInlinedFileDeletions(table_id, snapshot);
-
-		string inlined_candidates;
-		if (!inlined_deletions.empty()) {
-			inlined_candidates = StringUtil::Format(
-			    R"(
-					UNION
-					SELECT file_id AS data_file_id
-					FROM {METADATA_CATALOG}.%s
-					WHERE begin_snapshot <= %llu
-				)",
-			    InlinedFileDeletionTableName(table_id), snapshot.snapshot_id);
-		}
-
-		candidate_files_cte = StringUtil::Format(
-		    R"(
-				candidate_files AS (
-					SELECT data_file_id
-					FROM {METADATA_CATALOG}.ducklake_delete_file
-					WHERE table_id=%d AND end_snapshot IS NULL%s
-				),
-			)",
-		    table_id.index, inlined_candidates);
-
-		data_file_source = R"(candidate_files
-JOIN {METADATA_CATALOG}.ducklake_data_file data USING (data_file_id))";
-		delete_file_filter = " AND end_snapshot IS NULL";
-		partition_value_filter = "\n\tWHERE data_file_id IN (SELECT data_file_id FROM candidate_files)";
 	}
-
-	auto query = StringUtil::Format(R"(
-WITH %ssnapshot_ranges AS (
-	SELECT
-		begin_snapshot,
-		COALESCE(
-			LEAD(begin_snapshot) OVER (ORDER BY begin_snapshot ASC),
-			9223372036854775807
-		) AS end_snapshot,
-		schema_version
-	FROM {METADATA_CATALOG}.ducklake_schema_versions
-	WHERE table_id=%d
-	ORDER BY begin_snapshot ASC
-)
-SELECT %s
-FROM %s
-LEFT JOIN snapshot_ranges sr
-	ON COALESCE(data.partial_max, data.begin_snapshot) >= sr.begin_snapshot
-	AND COALESCE(data.partial_max, data.begin_snapshot) < sr.end_snapshot
-LEFT JOIN (
-	SELECT *
-	FROM {METADATA_CATALOG}.ducklake_delete_file
-	WHERE table_id=%d%s
-) del USING (data_file_id)
-LEFT JOIN (
-	SELECT data_file_id, ARRAY_AGG(partition_value ORDER BY partition_key_index ASC) keys
-	FROM {METADATA_CATALOG}.ducklake_file_partition_value%s
-	GROUP BY data_file_id
-) partition_info USING (data_file_id)
-WHERE data.table_id=%d %s
-ORDER BY data.begin_snapshot ASC, data.row_id_start ASC, data.data_file_id ASC, del.begin_snapshot ASC
-	)",
-	                                candidate_files_cte, table_id.index, select_list, data_file_source, table_id.index,
-	                                delete_file_filter, partition_value_filter, table_id.index, file_filter_clause);
-	auto result = Query(query);
-	result->ThrowIfError("Failed to get compaction file list from DuckLake: ");
+	unordered_map<idx_t, vector<Value>> partition_values;
+	for (auto &row : partition_values_result) {
+		partition_values[row.GetValue<idx_t>(0)].push_back(row.GetValue<Value>(1));
+	}
 	vector<DuckLakeCompactionFileEntry> files;
-	for (auto &row : *result) {
+	for (auto &row : files_result) {
 		idx_t col_idx = 0;
 		DuckLakeCompactionFileEntry new_entry;
 		// parse the data file
@@ -3100,16 +3097,23 @@ ORDER BY data.begin_snapshot ASC, data.row_id_start ASC, data.data_file_id ASC, 
 			new_entry.file.mapping_id = MappingIndex(row.GetValue<idx_t>(col_idx));
 		}
 		col_idx++;
-		new_entry.schema_version = row.GetValue<idx_t>(col_idx++);
 		new_entry.max_partial_file_snapshot = OptIdx(row, col_idx++);
-		new_entry.file.partition_id = OptIdx(row, col_idx++);
-		if (!row.IsNull(col_idx)) {
-			auto list_val = row.GetValue<Value>(col_idx);
-			for (auto &entry : ListValue::GetChildren(list_val)) {
-				new_entry.file.partition_values.push_back(entry);
-			}
+		// the schema version that was current at the last snapshot the file holds rows of
+		auto last_snapshot = new_entry.max_partial_file_snapshot.IsValid()
+		                         ? new_entry.max_partial_file_snapshot.GetIndex()
+		                         : new_entry.file.begin_snapshot;
+		auto schema_version = schema_versions.upper_bound(last_snapshot);
+		if (schema_version == schema_versions.begin()) {
+			throw InvalidInputException("Failed to get compaction file list from DuckLake: no schema version of "
+			                            "table %d holds snapshot %d",
+			                            table_id.index, last_snapshot);
 		}
-		col_idx++;
+		new_entry.schema_version = prev(schema_version)->second;
+		new_entry.file.partition_id = OptIdx(row, col_idx++);
+		auto file_partition_values = partition_values.find(new_entry.file.id.index);
+		if (file_partition_values != partition_values.end()) {
+			new_entry.file.partition_values = file_partition_values->second;
+		}
 		new_entry.file.data = ReadDataFile(table, row, col_idx, IsEncrypted());
 		if (files.empty() || files.back().file.id != new_entry.file.id) {
 			// new file - push it into the file list
@@ -6339,8 +6343,9 @@ string DuckLakeMetadataManager::InsertNewSchema(const DuckLakeSnapshot &snapshot
 }
 
 unordered_set<idx_t> DuckLakeMetadataManager::GetTablesWithLiveDataFiles() {
-	auto result =
-	    Query("SELECT DISTINCT table_id FROM {METADATA_CATALOG}.ducklake_data_file WHERE end_snapshot IS NULL");
+	DuckLakeReadBatch reads;
+	reads.Add({"SELECT DISTINCT table_id FROM {METADATA_CATALOG}.ducklake_data_file WHERE end_snapshot IS NULL"});
+	auto result = std::move(Query(DuckLakeSnapshot(), reads)[0]);
 	result->ThrowIfError("Failed to get the tables with data files from DuckLake: ");
 	unordered_set<idx_t> table_ids;
 	for (auto &row : *result) {

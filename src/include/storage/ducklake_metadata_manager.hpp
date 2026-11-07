@@ -391,10 +391,15 @@ public:
 	                         const FilterPushdownInfo *filter_info = nullptr);
 	//! Sets the schema version of the partition spec of the files written with an older spec
 	void SetPartitionSchemaVersions(DuckLakeTableEntry &table, vector<DuckLakeCompactionFileEntry> &files);
-	virtual vector<DuckLakeCompactionFileEntry> GetFilesForCompaction(DuckLakeTableEntry &table, CompactionType type,
-	                                                                  double deletion_threshold,
-	                                                                  DuckLakeSnapshot snapshot,
-	                                                                  DuckLakeFileSizeOptions options);
+	//! Adds the reads of the files a compaction of the table considers, for one batch with those of other tables
+	void AddFilesForCompactionReads(DuckLakeReadBatch &reads, DuckLakeTableEntry &table, CompactionType type,
+	                                DuckLakeSnapshot snapshot, DuckLakeFileSizeOptions options,
+	                                const map<idx_t, set<idx_t>> &inlined_deletions);
+	//! The files of the results of the reads that AddFilesForCompactionReads added, from the first of them
+	virtual vector<DuckLakeCompactionFileEntry>
+	GetFilesForCompaction(DuckLakeTableEntry &table, CompactionType type, double deletion_threshold,
+	                      DuckLakeSnapshot snapshot, map<idx_t, set<idx_t>> inlined_deletions,
+	                      vector<unique_ptr<QueryResult>>::iterator results);
 	virtual idx_t GetBeginSnapshotForTable(TableIndex table_id);
 	virtual idx_t GetBeginSnapshotForSchemaVersion(TableIndex table_id, idx_t schema_version);
 	DuckLakeTableSchemaVersions GetTableSchemaVersions(TableIndex table_id, DuckLakeSnapshot snapshot);

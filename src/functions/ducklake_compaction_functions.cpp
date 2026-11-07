@@ -291,17 +291,26 @@ static bool TimestampRetypedInLatest(const vector<unique_ptr<DuckLakeFieldId>> &
 	return false;
 }
 
-void DuckLakeCompactor::GenerateCompactions(DuckLakeTableEntry &table,
+void DuckLakeCompactor::AddReads(DuckLakeTableEntry &table, DuckLakeReadBatch &reads) {
+	auto &metadata_manager = transaction.GetMetadataManager();
+	snapshot = transaction.GetSnapshot();
+	target_file_size = catalog.GetTargetFileSize(context, table);
+	if (type == CompactionType::REWRITE_DELETES) {
+		// the inlined deletions select files for the rewrite
+		inlined_deletions = metadata_manager.ReadInlinedFileDeletions(table_id, snapshot);
+	}
+	first_read = reads.GetReads().size();
+	DuckLakeFileSizeOptions filter_options(options, target_file_size);
+	metadata_manager.AddFilesForCompactionReads(reads, table, type, snapshot, filter_options, inlined_deletions);
+}
+
+void DuckLakeCompactor::GenerateCompactions(DuckLakeTableEntry &table, vector<unique_ptr<QueryResult>> &results,
                                             vector<unique_ptr<LogicalOperator>> &compactions) {
 	auto &metadata_manager = transaction.GetMetadataManager();
-	auto snapshot = transaction.GetSnapshot();
-
-	idx_t target_file_size = catalog.GetTargetFileSize(context, table);
-
-	DuckLakeFileSizeOptions filter_options(options, target_file_size);
 	// FIXME: pass in the sort_data so that list of files is approximately sorted in the same way
 	// (sorted by the min/max metadata)
-	auto files = metadata_manager.GetFilesForCompaction(table, type, delete_threshold, snapshot, filter_options);
+	auto files = metadata_manager.GetFilesForCompaction(table, type, delete_threshold, snapshot,
+	                                                    std::move(inlined_deletions), results.begin() + first_read);
 	auto files_compacted_in_transaction = transaction.GetCompactedFiles(table_id);
 
 	// Resolve, per schema_version (cached), whether a file written under it can be rewritten under the latest schema.
@@ -815,24 +824,18 @@ static unique_ptr<LogicalOperator> GenerateCompactionOperator(TableFunctionBindI
 	return result;
 }
 
-static void GenerateCompaction(ClientContext &context, DuckLakeTransaction &transaction,
-                               DuckLakeCatalog &ducklake_catalog, TableFunctionBindInput &input,
-                               DuckLakeTableEntry &cur_table, CompactionType type, double delete_threshold,
-                               uint64_t max_files, const DuckLakeMergeAdjacentOptions &merge_options,
-                               vector<unique_ptr<LogicalOperator>> &compactions) {
+static unique_ptr<DuckLakeCompactor> CreateCompactor(ClientContext &context, DuckLakeTransaction &transaction,
+                                                     DuckLakeCatalog &ducklake_catalog, TableFunctionBindInput &input,
+                                                     DuckLakeTableEntry &cur_table, CompactionType type,
+                                                     double delete_threshold, uint64_t max_files,
+                                                     const DuckLakeMergeAdjacentOptions &merge_options) {
 	switch (type) {
-	case CompactionType::MERGE_ADJACENT_TABLES: {
-		DuckLakeCompactor compactor(context, ducklake_catalog, transaction, *input.binder, cur_table.GetTableId(),
-		                            max_files, merge_options);
-		compactor.GenerateCompactions(cur_table, compactions);
-		break;
-	}
-	case CompactionType::REWRITE_DELETES: {
-		DuckLakeCompactor compactor(context, ducklake_catalog, transaction, *input.binder, cur_table.GetTableId(),
-		                            max_files, delete_threshold);
-		compactor.GenerateCompactions(cur_table, compactions);
-		break;
-	}
+	case CompactionType::MERGE_ADJACENT_TABLES:
+		return make_uniq<DuckLakeCompactor>(context, ducklake_catalog, transaction, *input.binder,
+		                                    cur_table.GetTableId(), max_files, merge_options);
+	case CompactionType::REWRITE_DELETES:
+		return make_uniq<DuckLakeCompactor>(context, ducklake_catalog, transaction, *input.binder,
+		                                    cur_table.GetTableId(), max_files, delete_threshold);
 	default:
 		throw InternalException("Compaction type not recognized");
 	}
@@ -923,7 +926,10 @@ static unique_ptr<LogicalOperator> BindCompaction(ClientContext &context, TableF
 	if (skip_tables_without_files) {
 		tables_with_files = transaction.GetMetadataManager().GetTablesWithLiveDataFiles();
 	}
-	vector<unique_ptr<LogicalOperator>> compactions;
+	vector<reference<DuckLakeTableEntry>> compacted_tables;
+	vector<unique_ptr<DuckLakeCompactor>> compactors;
+	// the files of every table in one read batch
+	DuckLakeReadBatch reads;
 	for (auto &table_ref : tables) {
 		auto &cur_table = table_ref.get();
 		if (!ducklake_catalog.AutoCompactEnabled(cur_table)) {
@@ -933,8 +939,18 @@ static unique_ptr<LogicalOperator> BindCompaction(ClientContext &context, TableF
 		if (skip_tables_without_files && !tables_with_files.count(cur_table.GetTableId().index)) {
 			continue;
 		}
-		GenerateCompaction(context, transaction, ducklake_catalog, input, cur_table, type, delete_threshold, max_files,
-		                   merge_options, compactions);
+		compactors.push_back(CreateCompactor(context, transaction, ducklake_catalog, input, cur_table, type,
+		                                     delete_threshold, max_files, merge_options));
+		compactors.back()->AddReads(cur_table, reads);
+		compacted_tables.push_back(cur_table);
+	}
+	vector<unique_ptr<LogicalOperator>> compactions;
+	if (compactors.empty()) {
+		return GenerateCompactionOperator(input, bind_index, compactions);
+	}
+	auto results = transaction.GetMetadataManager().Query(transaction.GetSnapshot(), reads);
+	for (idx_t i = 0; i < compactors.size(); i++) {
+		compactors[i]->GenerateCompactions(compacted_tables[i], results, compactions);
 	}
 	return GenerateCompactionOperator(input, bind_index, compactions);
 }
