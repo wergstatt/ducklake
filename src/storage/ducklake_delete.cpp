@@ -718,11 +718,6 @@ PhysicalOperator &DuckLakeDelete::PlanDelete(ClientContext &context, PhysicalPla
 	for (auto &delete_source : delete_sources) {
 		auto &bind_data = delete_source.get().bind_data->Cast<MultiFileBindData>();
 		auto &reader = bind_data.multi_file_reader->Cast<DuckLakeMultiFileReader>();
-		auto &file_list = bind_data.file_list->Cast<DuckLakeMultiFileList>();
-		auto files = file_list.GetFilesExtended();
-		for (auto &file_entry : files) {
-			delete_map->AddExtendedFileInfo(std::move(file_entry));
-		}
 		delete_map->file_lists.push_back(bind_data.file_list);
 		reader.delete_map = delete_map;
 	}
