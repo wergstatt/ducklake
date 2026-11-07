@@ -91,8 +91,9 @@ void DuckLakeInitializer::Initialize() {
 	// directly query a known ducklake metadata table to avoid scanning all attached catalogs via duckdb_tables()
 	// this prevents a corrupted ducklake catalog from blocking initialization of unrelated ducklake databases
 	// FIXME: verify that all ducklake tables are in the correct format
-	if (transaction.GetMetadataManager().MetadataExists()) {
-		LoadExistingDuckLakeWithRetries(transaction);
+	auto metadata = transaction.GetMetadataManager().TryLoadDuckLake();
+	if (metadata) {
+		LoadExistingDuckLakeWithRetries(transaction, std::move(metadata));
 	} else {
 		if (!options.create_if_not_exists) {
 			throw InvalidInputException("Existing DuckLake at metadata catalog \"%s\" does not exist - and creating a "
@@ -109,7 +110,7 @@ void DuckLakeInitializer::Initialize() {
 			if (!DuckLakeIsInitialized(transaction)) {
 				error.Throw();
 			}
-			LoadExistingDuckLakeWithRetries(transaction);
+			LoadExistingDuckLakeWithRetries(transaction, nullptr);
 		}
 	}
 	auto &current_metadata_manager = transaction.GetMetadataManager();
@@ -136,7 +137,8 @@ static bool PermanentLoadError(const ErrorData &error) {
 	}
 }
 
-void DuckLakeInitializer::LoadExistingDuckLakeWithRetries(DuckLakeTransaction &transaction) {
+void DuckLakeInitializer::LoadExistingDuckLakeWithRetries(DuckLakeTransaction &transaction,
+                                                          unique_ptr<DuckLakeMetadata> metadata) {
 	// wait for a migration of another attach, whose errors we cannot tell from a real failure
 	static constexpr idx_t MAX_WAIT_MS = 3000;
 	auto retry_config = DuckLakeRetryConfig::FromContext(context);
@@ -144,7 +146,7 @@ void DuckLakeInitializer::LoadExistingDuckLakeWithRetries(DuckLakeTransaction &t
 	idx_t waited_ms = 0;
 	for (idx_t attempt = 0;; attempt++) {
 		try {
-			LoadExistingDuckLake(transaction);
+			LoadExistingDuckLake(transaction, std::move(metadata));
 			return;
 		} catch (std::exception &ex) {
 			ErrorData error(ex);
@@ -257,13 +259,17 @@ void DuckLakeInitializer::InitializeNewDuckLake(DuckLakeTransaction &transaction
 	}
 }
 
-void DuckLakeInitializer::LoadExistingDuckLake(DuckLakeTransaction &transaction) {
+void DuckLakeInitializer::LoadExistingDuckLake(DuckLakeTransaction &transaction,
+                                               unique_ptr<DuckLakeMetadata> metadata) {
 	migrating = false;
 	// load the data path from the existing duck lake
 	auto &metadata_manager = transaction.GetMetadataManager();
-	auto metadata = metadata_manager.LoadDuckLake();
+	if (!metadata) {
+		// a retry runs in a new metadata transaction, which reads the metadata again
+		metadata = make_uniq<DuckLakeMetadata>(metadata_manager.LoadDuckLake());
+	}
 	DuckLakeVersion resolved_version = DuckLakeVersion::UNSET;
-	for (auto &tag : metadata.tags) {
+	for (auto &tag : metadata->tags) {
 		if (tag.key == "version") {
 			auto catalog_version = DuckLakeVersionFromString(tag.value);
 			auto target_version = ResolveTargetVersion(catalog_version, tag.value);
@@ -356,10 +362,10 @@ void DuckLakeInitializer::LoadExistingDuckLake(DuckLakeTransaction &transaction)
 		}
 		options.config_options[tag.key] = tag.value;
 	}
-	for (auto &entry : metadata.schema_settings) {
+	for (auto &entry : metadata->schema_settings) {
 		options.schema_options[entry.schema_id][entry.tag.key] = entry.tag.value;
 	}
-	for (auto &entry : metadata.table_settings) {
+	for (auto &entry : metadata->table_settings) {
 		options.table_options[entry.table_id][entry.tag.key] = entry.tag.value;
 	}
 	// set correct version metadata manager

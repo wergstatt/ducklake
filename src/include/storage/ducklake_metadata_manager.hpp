@@ -313,6 +313,8 @@ public:
 	//! Get the version string written to ducklake_metadata
 	virtual string GetVersionString();
 	virtual DuckLakeMetadata LoadDuckLake();
+	//! Load the metadata of the DuckLake in the metadata catalog, nullptr if there is none yet
+	virtual unique_ptr<DuckLakeMetadata> TryLoadDuckLake();
 
 	virtual unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, string &query);
 	virtual unique_ptr<QueryResult> Execute(string &query);

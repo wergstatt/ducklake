@@ -25,9 +25,10 @@ public:
 
 private:
 	void InitializeNewDuckLake(DuckLakeTransaction &transaction, bool has_explicit_schema);
-	void LoadExistingDuckLake(DuckLakeTransaction &transaction);
+	//! Loads an existing DuckLake from its metadata, read here if not given
+	void LoadExistingDuckLake(DuckLakeTransaction &transaction, unique_ptr<DuckLakeMetadata> metadata);
 	//! Loads an existing DuckLake, retrying when another attach migrates it at the same time
-	void LoadExistingDuckLakeWithRetries(DuckLakeTransaction &transaction);
+	void LoadExistingDuckLakeWithRetries(DuckLakeTransaction &transaction, unique_ptr<DuckLakeMetadata> metadata);
 	void AttachMetadata(DuckLakeTransaction &transaction);
 	void RestartMetadataTransaction(DuckLakeTransaction &transaction);
 	bool DuckLakeIsInitialized(DuckLakeTransaction &transaction);
