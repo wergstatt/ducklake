@@ -1665,8 +1665,10 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 			if (expired_by_statements || !metadata_manager->ExpiresSnapshotsInCommit()) {
 				return DuckLakeBatch();
 			}
+			// for every inlined table, while the inlined tables of the tables it deletes stay for
+			// DropInlinedTablesOfDeletedTables after the commit
 			idx_t from_end;
-			auto cleanup = metadata_manager->ExpiredSnapshotsCommitCleanup(from_end);
+			auto cleanup = metadata_manager->ExpiredSnapshotsCleanupSql(expiry_inlined_tables, &from_end);
 			expired_tables_statement = from_end;
 			return cleanup;
 		};
@@ -2090,8 +2092,7 @@ void DuckLakeTransaction::CreateSnapshotTag(const string &name, idx_t snapshot_i
 
 void DuckLakeTransaction::CheckNotExpiredInTransaction(idx_t snapshot_id) {
 	auto expired = expired_in_transaction;
-	for (auto &filter : expiry_filters) {
-		auto selected = ExpirableSnapshotsInternal(filter);
+	for (auto &selected : ReadExpiryInternal(expiry_filters).expirable) {
 		expired.insert(expired.end(), selected.begin(), selected.end());
 	}
 	for (auto &snapshot : expired) {
@@ -2175,13 +2176,14 @@ void DuckLakeTransaction::DropSnapshotTag(const string &name) {
 
 vector<DuckLakeSnapshotTagInfo> DuckLakeTransaction::GetSnapshotTags() {
 	lock_guard<mutex> guard(snapshot_tag_lock);
-	return GetSnapshotTagsInternal();
+	return GetSnapshotTagsInternal(GetMetadataManager().GetSnapshotTags(), true);
 }
 
-vector<DuckLakeSnapshotTagInfo> DuckLakeTransaction::GetSnapshotTagsInternal(bool with_snapshot_time) {
+vector<DuckLakeSnapshotTagInfo> DuckLakeTransaction::GetSnapshotTagsInternal(vector<DuckLakeSnapshotTagInfo> committed,
+                                                                             bool with_snapshot_time) {
 	auto &metadata_manager = GetMetadataManager();
 	vector<DuckLakeSnapshotTagInfo> result;
-	for (auto &tag : metadata_manager.GetSnapshotTags(with_snapshot_time)) {
+	for (auto &tag : committed) {
 		if (state->dropped_snapshot_tags.find(tag.name) == state->dropped_snapshot_tags.end() &&
 		    state->expired_snapshot_tags.find(tag.name) == state->expired_snapshot_tags.end()) {
 			result.push_back(std::move(tag));
@@ -2207,44 +2209,48 @@ vector<DuckLakeSnapshotTagInfo> DuckLakeTransaction::GetSnapshotTagsInternal(boo
 	return result;
 }
 
-vector<DuckLakeSnapshotInfo> DuckLakeTransaction::ExpirableSnapshots(const string &filter) {
+vector<DuckLakeSnapshotInfo> DuckLakeTransaction::ExpirableSnapshots(const DuckLakeStatement &filter) {
 	lock_guard<mutex> guard(snapshot_tag_lock);
 	return ExpirableSnapshotsInternal(filter);
 }
 
-vector<DuckLakeSnapshotInfo> DuckLakeTransaction::ExpirableSnapshotsInternal(const string &filter) {
-	auto tagged_snapshots = TaggedSnapshotsInternal();
-	vector<DuckLakeSnapshotInfo> result;
-	for (auto &snapshot : GetMetadataManager().GetAllSnapshots(filter)) {
-		if (tagged_snapshots.find(snapshot.id) == tagged_snapshots.end()) {
-			result.push_back(std::move(snapshot));
+vector<DuckLakeSnapshotInfo> DuckLakeTransaction::ExpirableSnapshotsInternal(const DuckLakeStatement &filter) {
+	return std::move(ReadExpiryInternal({filter}).expirable[0]);
+}
+
+DuckLakeTransaction::ExpiryReads DuckLakeTransaction::ReadExpiryInternal(const vector<DuckLakeStatement> &filters,
+                                                                         bool inlined_tables) {
+	auto reads = GetMetadataManager().ReadExpiry(filters, inlined_tables);
+	ExpiryReads result;
+	result.tags = SplitSnapshotTagsInternal(std::move(reads.tags));
+	for (auto &snapshots : reads.snapshots) {
+		vector<DuckLakeSnapshotInfo> expirable;
+		for (auto &snapshot : snapshots) {
+			if (result.tags.protected_snapshots.find(snapshot.id) == result.tags.protected_snapshots.end()) {
+				expirable.push_back(std::move(snapshot));
+			}
 		}
+		result.expirable.push_back(std::move(expirable));
 	}
+	result.inlined_tables = std::move(reads.inlined_tables);
 	return result;
 }
 
-set<idx_t> DuckLakeTransaction::TaggedSnapshotsInternal() {
-	set<idx_t> result;
-	for (auto &tag : GetSnapshotTagsInternal(false)) {
-		if (!SnapshotTagExpired(tag)) {
-			result.insert(tag.snapshot_id);
-		}
-	}
-	return result;
-}
-
-vector<DuckLakeSnapshotTagInfo> DuckLakeTransaction::ExpiredSnapshotTagsInternal() {
-	vector<DuckLakeSnapshotTagInfo> result;
-	for (auto &tag : GetSnapshotTagsInternal(false)) {
+DuckLakeTransaction::SnapshotTagSplit
+DuckLakeTransaction::SplitSnapshotTagsInternal(vector<DuckLakeSnapshotTagInfo> committed) {
+	SnapshotTagSplit result;
+	for (auto &tag : GetSnapshotTagsInternal(std::move(committed), false)) {
 		if (SnapshotTagExpired(tag)) {
-			result.push_back(std::move(tag));
+			result.expired.push_back(std::move(tag));
+		} else {
+			result.protected_snapshots.insert(tag.snapshot_id);
 		}
 	}
 	return result;
 }
 
-vector<DuckLakeSnapshotInfo> DuckLakeTransaction::ExpireSnapshots(const string &filter) {
-	if (filter.empty()) {
+vector<DuckLakeSnapshotInfo> DuckLakeTransaction::ExpireSnapshots(const DuckLakeStatement &filter) {
+	if (filter.sql.empty()) {
 		// no criterion selects nothing, while no filter would select every snapshot
 		return vector<DuckLakeSnapshotInfo>();
 	}
@@ -2282,38 +2288,45 @@ DuckLakeExpiry DuckLakeTransaction::ExpiredSnapshotsForCommit(idx_t attempt, idx
 	// a retry selects the expired tags again from the latest tags
 	state->expired_snapshot_tags.clear();
 	map<idx_t, DuckLakeSnapshotInfo> expired;
-	for (auto &filter : expiry_filters) {
-		for (auto &snapshot : ExpirableSnapshotsInternal(filter)) {
+	auto reads = ReadExpiryInternal(expiry_filters, GetMetadataManager().ExpiresSnapshotsInCommit());
+	for (auto &snapshots : reads.expirable) {
+		for (auto &snapshot : snapshots) {
 			expired.emplace(snapshot.id, std::move(snapshot));
 		}
 	}
 	for (auto &entry : expired) {
 		result.snapshots.push_back(std::move(entry.second));
 	}
-	result.tags = ExpiredSnapshotTagsInternal();
+	result.tags = std::move(reads.tags.expired);
+	expiry_inlined_tables = std::move(reads.inlined_tables);
 	return result;
 }
 
-vector<DuckLakeSnapshotInfo> DuckLakeTransaction::ExpireSnapshotsNow(const string &filter) {
+vector<DuckLakeSnapshotInfo> DuckLakeTransaction::ExpireSnapshotsNow(const DuckLakeStatement &filter) {
 	auto &metadata_manager = GetMetadataManager();
 	optional_idx latest_snapshot_id;
 	if (ExpiresSnapshotsOnCommit()) {
 		// read before the snapshots, so a commit they miss is newer than the snapshot the commit checks for
-		latest_snapshot_id = metadata_manager.GetSnapshot()->snapshot_id;
+		latest_snapshot_id = GetLatestSnapshot().snapshot_id;
 	}
-	auto expired = ExpirableSnapshotsInternal(filter);
+	bool deferred = DefersExpiryToCommit();
+	// the cleanup that the batch of the commit carries deletes the expired rows of the inlined tables
+	auto reads = ReadExpiryInternal({filter}, deferred);
+	auto expired = std::move(reads.expirable[0]);
 	vector<DuckLakeSnapshotTagInfo> expired_tags;
 	if (latest_snapshot_id.IsValid()) {
-		expired_tags = ExpiredSnapshotTagsInternal();
+		expired_tags = std::move(reads.tags.expired);
+	}
+	if (deferred) {
+		expiry_inlined_tables = std::move(reads.inlined_tables);
 	}
 	if (expired.empty() && expired_tags.empty()) {
 		return expired;
 	}
 	if (!latest_snapshot_id.IsValid()) {
 		// expiring deletes inlined rows by their snapshot columns so the catalog version must be current
-		metadata_manager.GetSnapshot();
+		GetLatestSnapshot();
 	}
-	bool deferred = DefersExpiryToCommit();
 	if (!expired.empty() && !deferred) {
 		if (!metadata_manager.CommitsEachStatement()) {
 			// set first, a failure part way leaves some of the snapshots deleted

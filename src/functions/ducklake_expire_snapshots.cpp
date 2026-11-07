@@ -11,7 +11,7 @@ struct ExpireSnapshotsBindData : public MetadataBindData {
 
 	DuckLakeCatalog &catalog;
 	//! The criterion of the expiry, empty when nothing is expired
-	string filter;
+	DuckLakeStatement filter;
 	bool dry_run = false;
 };
 
@@ -42,7 +42,7 @@ static unique_ptr<FunctionData> DuckLakeExpireSnapshotsBind(ClientContext &conte
 	if (!result->dry_run) {
 		ducklake_catalog.VerifyWritable();
 	}
-	vector<string> snapshot_ids;
+	vector<Value> snapshot_ids;
 	auto versions_entry = input.named_parameters.find("versions");
 	bool has_versions = versions_entry != input.named_parameters.end();
 	if (has_versions && !versions_entry->second.IsNull()) {
@@ -53,7 +53,7 @@ static unique_ptr<FunctionData> DuckLakeExpireSnapshotsBind(ClientContext &conte
 			if (BigIntValue::Get(snapshot_id) < 0) {
 				throw BinderException("The versions option must only contain non-negative snapshot ids.");
 			}
-			snapshot_ids.push_back(snapshot_id.ToString());
+			snapshot_ids.push_back(snapshot_id);
 		}
 	}
 	Value older_than;
@@ -66,25 +66,28 @@ static unique_ptr<FunctionData> DuckLakeExpireSnapshotsBind(ClientContext &conte
 	// an empty version set, or no criterion and no global default, expires no snapshots
 	if ((has_versions && snapshot_ids.empty()) || (!has_versions && !has_timestamp && older_than_default.empty())) {
 		// the expiry still drops the tags whose expiry time has passed
-		result->filter = "FALSE";
+		result->filter.sql = "FALSE";
 		return std::move(result);
 	}
 
-	string filter;
+	auto &filter = result->filter;
 	// we can never delete the most recent snapshot
-	filter = "snapshot_id != (SELECT MAX(snapshot_id) FROM {METADATA_CATALOG}.ducklake_snapshot) AND ";
+	filter.sql = "snapshot_id != (SELECT MAX(snapshot_id) FROM {METADATA_CATALOG}.ducklake_snapshot) AND ";
 	if (has_timestamp) {
 		auto from_timestamp = older_than.GetValue<timestamp_tz_t>();
 		auto timestamp_filter = DuckLakeTableFunctionUtil::FormatTimestampISO8601(timestamp_t(from_timestamp.value));
-		filter += StringUtil::Format("snapshot_time::TIMESTAMPTZ < '%s'", timestamp_filter);
+		filter.Append({"CAST(snapshot_time AS TIMESTAMPTZ) < $1", {Value(timestamp_filter)}});
 	} else if (!has_versions) {
 		auto timestamp_filter =
 		    DuckLakeTableFunctionUtil::FormatTimestampOlderThan("expire_older_than", older_than_default);
-		filter += StringUtil::Format("snapshot_time::TIMESTAMPTZ < '%s'", timestamp_filter);
+		filter.Append({"CAST(snapshot_time AS TIMESTAMPTZ) < $1", {Value(timestamp_filter)}});
 	} else {
-		filter += StringUtil::Format("snapshot_id IN (%s)", StringUtil::Join(snapshot_ids, ", "));
+		vector<string> placeholders;
+		for (idx_t i = 0; i < snapshot_ids.size(); i++) {
+			placeholders.push_back("$" + to_string(i + 1));
+		}
+		filter.Append({"snapshot_id IN (" + StringUtil::Join(placeholders, ", ") + ")", std::move(snapshot_ids)});
 	}
-	result->filter = filter;
 	if (result->dry_run) {
 		auto &transaction = DuckLakeTransaction::Get(context, ducklake_catalog);
 		for (auto &snapshot : transaction.ExpirableSnapshots(filter)) {

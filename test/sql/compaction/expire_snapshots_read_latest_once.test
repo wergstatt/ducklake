@@ -1,0 +1,33 @@
+# name: test/sql/compaction/expire_snapshots_read_latest_once.test
+# description: An expiry and its commit read the latest snapshot once, as the snapshot of the transaction
+# group: [compaction]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/expire_snapshots_read_latest_once')
+
+statement ok
+CREATE TABLE dl.t (i INTEGER)
+
+statement ok
+INSERT INTO dl.t VALUES (1)
+
+statement ok
+CALL enable_logging('DuckLakeMetadata', storage = 'memory')
+
+query I
+SELECT snapshot_id FROM ducklake_expire_snapshots('dl', versions => [1])
+----
+1
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE contains(query, 'next_catalog_id, next_file_id')
+----
+1

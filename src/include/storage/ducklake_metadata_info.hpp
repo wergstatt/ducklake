@@ -329,6 +329,14 @@ struct DuckLakeSnapshotTagInfo {
 	Value expires_at = Value(LogicalType::TIMESTAMP_TZ);
 };
 
+//! What an expiry reads from the metadata catalog
+struct DuckLakeExpiryReads {
+	vector<DuckLakeSnapshotTagInfo> tags;
+	//! The snapshots that each filter selects
+	vector<vector<DuckLakeSnapshotInfo>> snapshots;
+	vector<Identifier> inlined_tables;
+};
+
 //! What the expiries of a transaction delete in a commit attempt
 struct DuckLakeExpiry {
 	vector<DuckLakeSnapshotInfo> snapshots;

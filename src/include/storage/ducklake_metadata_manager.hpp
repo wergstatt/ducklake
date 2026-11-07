@@ -349,6 +349,8 @@ public:
 
 	virtual unique_ptr<QueryResult> Query(DuckLakeSnapshot snapshot, string &query);
 	virtual unique_ptr<QueryResult> Query(string &query);
+	//! Runs the reads one by one, each with a result of its own
+	virtual vector<unique_ptr<QueryResult>> Query(DuckLakeSnapshot snapshot, const DuckLakeReadBatch &batch);
 
 	//! Rvalue sugar so call sites can pass `R"(...)"` and `StringUtil::Format(...)` directly.
 	//! Named-rvalue decays to an lvalue inside, so the virtual dispatch still picks up the
@@ -422,8 +424,8 @@ public:
 	DuckLakeTableSchemaVersions GetTableSchemaVersions(TableIndex table_id, DuckLakeSnapshot snapshot);
 	//! The net row count of the data files that were committed before the snapshot's next file id
 	virtual idx_t GetNetDataFileRowCount(TableIndex table_id, DuckLakeSnapshot snapshot);
-	optional_idx GetNetDataFileRowCountForStats(TableIndex table_id, DuckLakeSnapshot snapshot);
-	virtual idx_t GetNetInlinedRowCount(const Identifier &inlined_table_name, DuckLakeSnapshot snapshot);
+	//! The number of rows of a table, in data files and inlined, or invalid if it cannot be computed exactly
+	optional_idx GetNetRowCount(DuckLakeTableEntry &table, DuckLakeSnapshot snapshot);
 	//! SQL builders for stats-refresh metadata lookups; caller substitutes placeholders + executes.
 	//! With require_exact, the count is NULL if any visible file is only partially visible to the snapshot.
 	//! With exclude_new_files, the files of the commit, which can already be in the catalog, are not counted.
@@ -647,8 +649,13 @@ public:
 	virtual vector<DuckLakeSnapshotInfo> GetAllSnapshots(const string &filter = string());
 	//! The snapshots in the column order of ducklake_snapshots, then next_file_id
 	unique_ptr<QueryResult> ReadSnapshots(const string &filter);
+	vector<DuckLakeSnapshotInfo> ParseSnapshots(QueryResult &result);
 	//! The live snapshot tags, with the times of their snapshots if requested
 	virtual vector<DuckLakeSnapshotTagInfo> GetSnapshotTags(bool with_snapshot_time = true);
+	vector<DuckLakeSnapshotTagInfo> ParseSnapshotTags(QueryResult &result);
+	//! The live snapshot tags without their times, the snapshots of each filter and, if requested, the inlined data
+	//! tables, in one read batch
+	DuckLakeExpiryReads ReadExpiry(const vector<DuckLakeStatement> &filters, bool inlined_tables);
 	//! The snapshot of the live snapshot tag with the name, if any
 	optional_idx GetTaggedSnapshot(const string &name);
 	//! The snapshot id of a VERSION value, a snapshot id or the name of a snapshot tag
@@ -667,9 +674,6 @@ public:
 	//! expired_tables_from_end, sets the position of the statement that deletes tables, counted from the end
 	DuckLakeBatch ExpiredSnapshotsCleanupSql(const vector<Identifier> &inlined_tables,
 	                                         optional_ptr<idx_t> expired_tables_from_end = nullptr);
-	//! The cleanup after expired snapshots that ends the batch of the commit that deletes them, for every inlined
-	//! table. The inlined tables of the tables it deletes stay, for DropInlinedTablesOfDeletedTables after the commit
-	DuckLakeBatch ExpiredSnapshotsCommitCleanup(idx_t &expired_tables_from_end);
 	//! Drops the inlined tables of the given tables, and their registrations
 	static DuckLakeBatch DropInlinedTablesSql(const set<TableIndex> &tables, const vector<Identifier> &inlined_tables);
 	//! Drops the registered inlined tables of tables that no longer exist, after the commit of an expiry that deleted

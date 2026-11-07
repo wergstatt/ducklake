@@ -46,4 +46,20 @@ private:
 	vector<DuckLakeStatement> statements;
 };
 
+//! The reads that DuckLake runs on the metadata catalog in one go, each with a result of its own
+class DuckLakeReadBatch {
+public:
+	//! Adds a read and returns the position of its result
+	idx_t Add(DuckLakeStatement read) {
+		reads.push_back(std::move(read));
+		return reads.size() - 1;
+	}
+	const vector<DuckLakeStatement> &GetReads() const {
+		return reads;
+	}
+
+private:
+	vector<DuckLakeStatement> reads;
+};
+
 } // namespace duckdb

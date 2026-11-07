@@ -57,6 +57,8 @@ public:
 	unique_ptr<QueryResult> ExecuteDropInTransaction(string &query) override;
 	optional_idx BatchRowCount(QueryResult &result, idx_t from_end) override;
 	void DropInlinedTablesOfDeletedTables() override;
+	using DuckLakeMetadataManager::Query;
+	vector<unique_ptr<QueryResult>> Query(DuckLakeSnapshot snapshot, const DuckLakeReadBatch &batch) override;
 
 	void ClearCache() override;
 	//! postgres_scanner looks up a table it has not cached
@@ -82,10 +84,12 @@ protected:
 private:
 	//! Where the server error starts in the error of the last Execute, and which of its queries failed
 	optional_idx BatchServerErrorStart(const string &message, optional_ptr<idx_t> failed_query = nullptr) const;
-	//! Runs the statements of a batch in one round trip, with their values as parameters. With commit_sent, the
-	//! COMMIT of the transaction follows them, and commit_sent is set before it goes out
-	unique_ptr<QueryResult> ExecutePipeline(DuckLakeSnapshot snapshot, const DuckLakeBatch &batch,
-	                                        optional_ptr<bool> commit_sent = nullptr);
+	//! Runs statements in one round trip, with their values as parameters, keeping the results of reads if asked.
+	//! With commit_sent, the COMMIT of the transaction follows them, and commit_sent is set before it goes out
+	unique_ptr<QueryResult> ExecutePipeline(DuckLakeSnapshot snapshot, const vector<DuckLakeStatement> &batch,
+	                                        bool keep_results = false, optional_ptr<bool> commit_sent = nullptr);
+	//! Runs the reads in one round trip, and returns a query that scans the kept result of each
+	vector<string> KeepResults(DuckLakeSnapshot snapshot, const DuckLakeReadBatch &batch);
 
 	//! The queries of the last Execute, one of which the scanner repeats in front of a server error
 	vector<string> executed_queries;
