@@ -1,0 +1,46 @@
+# name: test/sql/deletion_inlining/list_deletion_tables_once.test
+# description: A read of three tables with inlined deletions looks for their deletion tables at most once
+# group: [deletion_inlining]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/list_deletion_tables_once', DATA_INLINING_ROW_LIMIT 10)
+
+statement ok
+CREATE TABLE dl.t1 AS SELECT r AS i FROM range(20) _(r)
+
+statement ok
+CREATE TABLE dl.t2 AS SELECT r AS i FROM range(20) _(r)
+
+statement ok
+CREATE TABLE dl.t3 AS SELECT r AS i FROM range(20) _(r)
+
+statement ok
+DELETE FROM dl.t1 WHERE i = 1
+
+statement ok
+DELETE FROM dl.t2 WHERE i = 1
+
+statement ok
+DELETE FROM dl.t3 WHERE i = 1
+
+statement ok
+CALL enable_logging('DuckLakeMetadata')
+
+query III
+SELECT (SELECT sum(i) FROM dl.t1), (SELECT sum(i) FROM dl.t2), (SELECT sum(i) FROM dl.t3)
+----
+189	189	189
+
+# the reads of the deletion tables name them without a quote in front
+query I
+SELECT count(*) <= 1 FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE query LIKE '%''ducklake_inlined_delete_%'
+----
+true
