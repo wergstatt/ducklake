@@ -613,9 +613,10 @@ const Identifier &DuckLakeServerSideCommit::ResolveInlinedTableName(TableIndex t
 	return inlined_table_name_cache.emplace(table_id.index, std::move(name)).first->second;
 }
 
-string DuckLakeServerSideCommit::BuildInlinedDataInserts(const vector<DuckLakeInlinedDataInfo> &new_data) {
+DuckLakeBatch DuckLakeServerSideCommit::BuildInlinedDataInserts(const vector<DuckLakeInlinedDataInfo> &new_data,
+                                                                idx_t snapshot_id) {
 	// Strip the outer parens off staged tuples, then reuse the shared metadata-manager formatter.
-	string batch;
+	DuckLakeBatch batch;
 	for (auto &entry : new_data) {
 		auto tuples_it = staged_inlined_tuples.find(entry.table_id);
 		if (tuples_it == staged_inlined_tuples.end() || tuples_it->second.empty()) {
@@ -632,14 +633,14 @@ string DuckLakeServerSideCommit::BuildInlinedDataInserts(const vector<DuckLakeIn
 			                        entry.table_id.index);
 		}
 
-		vector<string> cells_per_row;
+		vector<DuckLakeStatement> cells_per_row;
 		cells_per_row.reserve(tuples.size());
 		for (auto &tuple : tuples) {
-			cells_per_row.push_back(tuple.size() >= 2 ? tuple.substr(1, tuple.size() - 2) : tuple);
+			cells_per_row.push_back({tuple.size() >= 2 ? tuple.substr(1, tuple.size() - 2) : tuple, {}});
 		}
-		batch += DuckLakeMetadataManager::FormatInlinedDataInsert(inlined_table_name, entry.row_id_start, has_preserved,
-		                                                          has_preserved ? &row_ids_it->second : nullptr,
-		                                                          cells_per_row);
+		batch += DuckLakeMetadataManager::FormatInlinedDataInsert(
+		    inlined_table_name, snapshot_id, entry.row_id_start, has_preserved,
+		    has_preserved ? &row_ids_it->second : nullptr, cells_per_row);
 	}
 	return batch;
 }
@@ -684,13 +685,15 @@ DuckLakeCommitContext DuckLakeServerSideCommit::BuildContext(idx_t &committed_sn
 		auto sql = SubstitutePlaceholders(std::move(q), snapshot);
 		return fresh_conn.Query(sql);
 	};
-	ctx.write_inlined_data = [this](DuckLakeSnapshot &, const vector<DuckLakeInlinedDataInfo> &new_data,
-	                                const vector<DuckLakeTableInfo> &, const vector<DuckLakeTableInfo> &) -> string {
-		return BuildInlinedDataInserts(new_data);
+	ctx.write_inlined_data = [this](DuckLakeSnapshot &snapshot, const vector<DuckLakeInlinedDataInfo> &new_data,
+	                                const vector<DuckLakeTableInfo> &,
+	                                const vector<DuckLakeTableInfo> &) -> DuckLakeBatch {
+		return BuildInlinedDataInserts(new_data, snapshot.snapshot_id);
 	};
-	ctx.write_inlined_file_deletes = [](const vector<DuckLakeInlinedFileDeletionInfo> &new_deletes) -> string {
+	ctx.write_inlined_file_deletes = [](const vector<DuckLakeInlinedFileDeletionInfo> &new_deletes,
+	                                    idx_t snapshot_id) -> DuckLakeBatch {
 		bool created_new_table = false;
-		return DuckLakeMetadataManager::WriteNewInlinedFileDeletesSql(new_deletes, created_new_table);
+		return DuckLakeMetadataManager::WriteNewInlinedFileDeletesSql(new_deletes, snapshot_id, created_new_table);
 	};
 	ctx.get_table_stats = [this](TableIndex table_id) -> shared_ptr<DuckLakeTableStats> {
 		return GetExistingTableStats(table_id);

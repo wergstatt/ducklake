@@ -1449,32 +1449,32 @@ DuckLakeColumnStatsInfo DuckLakeColumnStatsInfo::FromColumnStats(FieldIndex fiel
                                                                  const DuckLakeColumnStats &stats) {
 	DuckLakeColumnStatsInfo column_stats;
 	column_stats.column_id = field_id;
-	column_stats.min_val = stats.has_min ? DuckLakeUtil::StatsToString(stats.min) : "NULL";
-	column_stats.max_val = stats.has_max ? DuckLakeUtil::StatsToString(stats.max) : "NULL";
-	column_stats.min_is_exact = stats.has_min ? DuckLakeUtil::BoolLiteral(stats.EffectiveMinIsExact()) : "NULL";
-	column_stats.max_is_exact = stats.has_max ? DuckLakeUtil::BoolLiteral(stats.EffectiveMaxIsExact()) : "NULL";
-	column_stats.column_size_bytes = to_string(stats.column_size_bytes);
+	column_stats.min_val = stats.has_min ? DuckLakeUtil::StatsValue(stats.min) : Value();
+	column_stats.max_val = stats.has_max ? DuckLakeUtil::StatsValue(stats.max) : Value();
+	column_stats.min_is_exact = stats.has_min ? Value::BOOLEAN(stats.EffectiveMinIsExact()) : Value();
+	column_stats.max_is_exact = stats.has_max ? Value::BOOLEAN(stats.EffectiveMaxIsExact()) : Value();
+	column_stats.column_size_bytes = Value::UBIGINT(stats.column_size_bytes);
 	if (stats.has_null_count && stats.has_num_values) {
 		// value_count should be the count of non-null values: num_values - null_count
 		// Validate that null_count doesn't exceed num_values to prevent underflow
 		if (stats.null_count > stats.num_values) {
 			// Invalid stats - null_count can't exceed total values
-			column_stats.value_count = "NULL";
-			column_stats.null_count = "NULL";
+			column_stats.value_count = Value();
+			column_stats.null_count = Value();
 		} else {
-			column_stats.value_count = to_string(stats.num_values - stats.null_count);
-			column_stats.null_count = to_string(stats.null_count);
+			column_stats.value_count = Value::UBIGINT(stats.num_values - stats.null_count);
+			column_stats.null_count = Value::UBIGINT(stats.null_count);
 		}
 	} else {
-		column_stats.value_count = "NULL";
-		column_stats.null_count = "NULL";
+		column_stats.value_count = Value();
+		column_stats.null_count = Value();
 	}
 	if (stats.has_contains_nan) {
-		column_stats.contains_nan = DuckLakeUtil::BoolLiteral(stats.contains_nan);
+		column_stats.contains_nan = Value::BOOLEAN(stats.contains_nan);
 	} else {
-		column_stats.contains_nan = "NULL";
+		column_stats.contains_nan = Value();
 	}
-	column_stats.extra_stats = "NULL";
+	column_stats.extra_stats = Value();
 	if (stats.extra_stats) {
 		stats.extra_stats->Serialize(column_stats);
 	}
@@ -1776,8 +1776,9 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 	                                   const set<TableIndex> &replaced_tables) {
 		return metadata_manager->WriteNewInlinedTables(snapshot, tables, replaced_tables);
 	};
-	context.write_inlined_file_deletes = [&](const vector<DuckLakeInlinedFileDeletionInfo> &new_deletes) {
-		return metadata_manager->WriteNewInlinedFileDeletesSqlBatch(new_deletes);
+	context.write_inlined_file_deletes = [&](const vector<DuckLakeInlinedFileDeletionInfo> &new_deletes,
+	                                         idx_t snapshot_id) {
+		return metadata_manager->WriteNewInlinedFileDeletesSqlBatch(new_deletes, snapshot_id);
 	};
 	context.write_inlined_data = [&](DuckLakeSnapshot &snapshot, const vector<DuckLakeInlinedDataInfo> &new_data,
 	                                 const vector<DuckLakeTableInfo> &new_tables,

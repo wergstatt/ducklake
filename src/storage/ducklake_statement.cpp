@@ -1,5 +1,6 @@
 #include "storage/ducklake_statement.hpp"
 
+#include "duckdb/common/sql_identifier.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/parser/parser.hpp"
 
@@ -42,7 +43,12 @@ string DuckLakeStatement::ToSQL() const {
 			throw InternalException("DuckLake statement refers to parameter $%d of %d", parameter, params.size());
 		}
 		auto &value = params[parameter - 1];
-		return value.IsNull() ? string("NULL") : value.ToSQLString();
+		if (value.IsNull()) {
+			return string("NULL");
+		}
+		// text keeps its NUL bytes, which a catalog that cannot store them rejects
+		return value.type().id() == LogicalTypeId::VARCHAR ? SQLString::ToString(StringValue::Get(value))
+		                                                   : value.ToSQLString();
 	});
 }
 

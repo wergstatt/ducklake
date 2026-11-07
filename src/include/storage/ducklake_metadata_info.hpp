@@ -141,15 +141,15 @@ struct DuckLakeMacroInfo {
 
 struct DuckLakeColumnStatsInfo {
 	FieldIndex column_id;
-	string value_count;
-	string null_count;
-	string column_size_bytes;
-	string min_val;
-	string max_val;
-	string contains_nan;
-	string extra_stats;
-	string min_is_exact;
-	string max_is_exact;
+	Value value_count;
+	Value null_count;
+	Value column_size_bytes;
+	Value min_val;
+	Value max_val;
+	Value contains_nan;
+	Value extra_stats;
+	Value min_is_exact;
+	Value max_is_exact;
 	vector<DuckLakeVariantStatsInfo> variant_stats;
 
 	static DuckLakeColumnStatsInfo FromColumnStats(FieldIndex field_id, const DuckLakeColumnStats &stats);
