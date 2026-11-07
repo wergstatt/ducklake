@@ -400,7 +400,7 @@ SELECT (SELECT count(*) FROM dl.snapshots() WHERE snapshot_id = 2), (SELECT coun
 ----
 1	0	[V1]
 
-# the same for a transaction that removed old files
+# a transaction that removed old files retries, and its retried commit removes them from the schedule again
 statement ok
 CREATE TABLE dl.old_files AS SELECT range AS i FROM range(100)
 
@@ -424,15 +424,14 @@ CALL dl.set_option('target_file_size', '1MB', table_name => 'r2')
 statement ok con1
 CALL dl.set_option('target_file_size', '2MB', table_name => 'r2')
 
-statement error con12
+statement ok con12
 COMMIT
-----
-Run the transaction again
 
-query II
-SELECT count(*), max(value) FROM dl.options() WHERE option_name = 'target_file_size' AND scope_entry = 'main.r2'
+query III
+SELECT count(*), max(value), (SELECT count(*) FROM __ducklake_metadata_dl.ducklake_files_scheduled_for_deletion)
+FROM dl.options() WHERE option_name = 'target_file_size' AND scope_entry = 'main.r2'
 ----
-1	2000000
+1	1000000	0
 
 # and for the transaction that attached the catalog
 statement ok con13

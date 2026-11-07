@@ -2342,7 +2342,6 @@ vector<DuckLakeSnapshotInfo> DuckLakeTransaction::ExpireSnapshotsNow(const DuckL
 void DuckLakeTransaction::RemoveFilesScheduledForCleanup(const vector<DuckLakeFileForCleanup> &files) {
 	auto &metadata_manager = GetMetadataManager();
 	metadata_manager.RemoveFilesScheduledForCleanup(files);
-	MarkMetadataWritten();
 	if (snapshots_expired) {
 		removed_files_after_expiry = true;
 	}
