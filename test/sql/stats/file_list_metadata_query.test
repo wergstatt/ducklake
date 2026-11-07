@@ -66,9 +66,7 @@ ORDER BY ts DESC LIMIT 1
 # PostgreSQL must receive exactly one complete, selective statement for the file-list operation.
 query I
 SELECT CASE WHEN (SELECT catalog_type FROM settings()) = 'postgres' THEN
-    (SELECT COALESCE(SUM(
-         (length(query) - length(replace(query, 'postgres_query', ''))) / length('postgres_query')
-     ), 0) = 1
+    (SELECT COUNT(*) = 1
      FROM (
          SELECT lower(regexp_replace(query, '\s+', '', 'g')) AS query
          FROM duckdb_logs_parsed('DuckLakeMetadata')
@@ -90,8 +88,8 @@ SELECT CASE WHEN (SELECT catalog_type FROM settings()) = 'postgres' THEN
          SELECT lower(regexp_replace(query, '\s+', '', 'g')) AS query
          FROM duckdb_logs_parsed('DuckLakeMetadata')
      ) logs
-     WHERE query LIKE 'select*frompostgres_query(%'
-       AND length(query) - length(replace(query, 'postgres_query', '')) = length('postgres_query')
+     WHERE query NOT LIKE '%"__ducklake_metadata_%'
+       AND length(query) - length(replace(query, 'postgres_query', '')) <= length('postgres_query')
        AND query LIKE '%ducklake_data_file%'
        AND query LIKE '%ducklake_delete_file%'
        AND query LIKE '%ducklake_file_column_stats%'
@@ -179,7 +177,7 @@ SELECT CASE WHEN (SELECT catalog_type FROM settings()) = 'postgres' THEN
          SELECT lower(regexp_replace(query, '\s+', '', 'g')) AS query
          FROM duckdb_logs_parsed('DuckLakeMetadata')
      ) logs
-     WHERE query LIKE 'select*frompostgres_query(%'
+     WHERE query NOT LIKE '%"__ducklake_metadata_%'
        AND query LIKE '%wherecolumn_id=1andtable_id=3%'
        AND query LIKE '%col_1_statsas(%'
        AND query LIKE '%max_value::real>%'
@@ -238,12 +236,12 @@ SELECT CASE WHEN (SELECT catalog_type FROM settings()) = 'postgres' THEN
          SELECT lower(regexp_replace(query, '\s+', '', 'g')) AS query
          FROM duckdb_logs_parsed('DuckLakeMetadata')
      ) logs
-     WHERE query LIKE 'select*frompostgres_query(%'
+     WHERE query NOT LIKE '%"__ducklake_metadata_%'
        AND query LIKE '%wheredata.table_id=4and%'
        AND query LIKE '%col_1_stats.min_valueascol_1_stats_min_value,col_1_stats.max_valueascol_1_stats_max_value%'
        AND query LIKE '%col_2_stats.min_valueascol_2_stats_min_value,col_2_stats.max_valueascol_2_stats_max_value%'
        AND query LIKE '%orderbycol_2_stats.max_value::bigintdescnullslast%'
-       AND length(query) - length(replace(query, 'postgres_query', '')) = length('postgres_query')
+       AND length(query) - length(replace(query, 'postgres_query', '')) <= length('postgres_query')
        AND length(query) - length(replace(query, 'wherecolumn_id=1andtable_id=4', '')) =
            length('wherecolumn_id=1andtable_id=4')
        AND length(query) - length(replace(query, 'wherecolumn_id=2andtable_id=4', '')) =

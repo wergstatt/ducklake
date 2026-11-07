@@ -566,6 +566,73 @@ vector<string> PostgresMetadataManager::KeepResults(DuckLakeSnapshot snapshot, c
 	return scans;
 }
 
+vector<DuckLakeFileListEntry> PostgresMetadataManager::GetFilesForTable(DuckLakeTableEntry &table,
+                                                                        DuckLakeSnapshot snapshot,
+                                                                        const FilterPushdownInfo *filter_info,
+                                                                        bool include_local_changes) {
+	if (!ScannerFunction(*transaction.GetConnection().context, "postgres_pipeline_result")) {
+		return DuckLakeMetadataManager::GetFilesForTable(table, snapshot, filter_info, include_local_changes);
+	}
+	vector<DuckLakeFileListDynamicFilter> dynamic_filter_columns;
+	vector<idx_t> runtime_filter_stats_columns;
+	GetDynamicFilters(filter_info, dynamic_filter_columns, runtime_filter_stats_columns);
+	DuckLakeReadBatch reads;
+	auto schema = SQLQuotedIdentifier::ToString(transaction.GetCatalog().MetadataSchemaName());
+	reads.Add(
+	    {DuckLakeMetadataManager::GenerateFileListQuery(table, snapshot, filter_info, dynamic_filter_columns,
+	                                                    runtime_filter_stats_columns, FileListType::SCAN, schema)});
+	auto deletion_table = GetInlinedDeletionTableName(table.GetTableId(), snapshot, include_local_changes);
+	if (!deletion_table.empty()) {
+		reads.Add({InlinedFileDeletionsQuery(deletion_table)});
+	}
+	// the scan reads the inlined rows later, from the kept result and with the columns it needs then
+	auto inlined_tables = table.GetInlinedDataTables(transaction, snapshot, include_local_changes);
+	for (auto &inlined_table : inlined_tables) {
+		reads.Add({InlinedDataQuery("*", inlined_table.table_name)});
+	}
+	auto scans = KeepResults(snapshot, reads);
+	auto file_list = transaction.ExecuteRaw(scans[0]);
+	file_list->ThrowIfError("Failed to get data file list from DuckLake: ");
+	idx_t next_scan = 1;
+	map<idx_t, set<idx_t>> inlined_deletions;
+	if (!deletion_table.empty()) {
+		auto deletions = transaction.ExecuteRaw(scans[next_scan++]);
+		deletions->ThrowIfError("Failed to read inlined file deletions from DuckLake: ");
+		inlined_deletions = ReadInlinedFileDeletions(*deletions);
+	}
+	{
+		lock_guard<mutex> guard(inlined_rows_lock);
+		for (auto &inlined_table : inlined_tables) {
+			inlined_rows[{snapshot.snapshot_id, inlined_table.table_name.GetIdentifierName()}] = scans[next_scan++];
+		}
+	}
+	return ReadFileList(table, snapshot, *file_list, runtime_filter_stats_columns, inlined_deletions);
+}
+
+unique_ptr<QueryResult> PostgresMetadataManager::ReadInlinedData(DuckLakeSnapshot snapshot,
+                                                                 const Identifier &inlined_table_name,
+                                                                 const vector<string> &columns_to_read) {
+	string scan;
+	{
+		lock_guard<mutex> guard(inlined_rows_lock);
+		auto entry = inlined_rows.find({snapshot.snapshot_id, inlined_table_name.GetIdentifierName()});
+		if (entry != inlined_rows.end()) {
+			scan = std::move(entry->second);
+			inlined_rows.erase(entry);
+		}
+	}
+	if (!scan.empty()) {
+		auto result =
+		    transaction.ExecuteRaw(StringUtil::Format("SELECT %s FROM (%s) inlined_data ORDER BY %s",
+		                                              GetProjection(columns_to_read), scan, InlinedColNames().row_id));
+		if (!result->HasError()) {
+			return result;
+		}
+		// a type that a kept result cannot hold fails to bind, and the table is read as before
+	}
+	return DuckLakeMetadataManager::ReadInlinedData(snapshot, inlined_table_name, columns_to_read);
+}
+
 unique_ptr<QueryResult> PostgresMetadataManager::ExecutePipeline(DuckLakeSnapshot snapshot,
                                                                  const vector<DuckLakeStatement> &batch,
                                                                  bool keep_results) {

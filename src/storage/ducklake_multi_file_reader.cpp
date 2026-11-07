@@ -306,6 +306,21 @@ DuckLakeMultiFileReader::InitializeGlobalState(ClientContext &context, const Mul
 	                                                     deletion_scan_file_row_number_col);
 }
 
+//! What a delete from the file needs to know about it
+static DuckLakeFileListExtendedEntry DeleteFileInfo(const DuckLakeFileListEntry &file_entry) {
+	DuckLakeFileListExtendedEntry result;
+	result.file_id = file_entry.file_id;
+	result.delete_file_id = file_entry.delete_file_id;
+	result.file = file_entry.file;
+	result.delete_file = file_entry.delete_file;
+	result.row_id_start = file_entry.row_id_start;
+	result.delete_file_begin_snapshot = file_entry.delete_file_begin_snapshot;
+	result.row_count = file_entry.row_count;
+	result.mapping_id = file_entry.mapping_id;
+	result.data_type = file_entry.data_type;
+	return result;
+}
+
 ReaderInitializeType DuckLakeMultiFileReader::InitializeReader(MultiFileReaderData &reader_data,
                                                                const MultiFileBindData &bind_data,
                                                                const vector<MultiFileColumnDefinition> &global_columns,
@@ -325,6 +340,10 @@ ReaderInitializeType DuckLakeMultiFileReader::InitializeReader(MultiFileReaderDa
 		if (CanSkipFileByRuntimeFilter(file_entry, filter_info, context)) {
 			return ReaderInitializeType::SKIP_READING_FILE;
 		}
+	}
+	if (delete_map) {
+		// the delete takes what it needs about the file from the file list of the scan
+		delete_map->AddExtendedFileInfo(DeleteFileInfo(file_entry));
 	}
 	if (!file_list.IsDeleteScan()) {
 		// regular scan - read the deletes from the delete file (if any) and apply the max row count

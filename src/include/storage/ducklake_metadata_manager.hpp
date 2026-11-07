@@ -695,6 +695,19 @@ protected:
 	                                     vector<idx_t> &runtime_filter_stats_columns,
 	                                     FileListType file_list_type = FileListType::SCAN,
 	                                     const string &metadata_table_prefix = "{METADATA_CATALOG}");
+	//! The Top-N dynamic filters of a scan, which order the files by their statistics and check them per file
+	static void GetDynamicFilters(const FilterPushdownInfo *filter_info,
+	                              vector<DuckLakeFileListDynamicFilter> &dynamic_filter_columns,
+	                              vector<idx_t> &runtime_filter_stats_columns);
+	//! The files of the result of a file list query, with their inlined file deletions
+	vector<DuckLakeFileListEntry> ReadFileList(DuckLakeTableEntry &table, DuckLakeSnapshot snapshot,
+	                                           QueryResult &result, const vector<idx_t> &runtime_filter_stats_columns,
+	                                           map<idx_t, set<idx_t>> &inlined_deletions);
+	static string InlinedFileDeletionsQuery(const Identifier &inlined_table_name);
+	static map<idx_t, set<idx_t>> ReadInlinedFileDeletions(QueryResult &query_result);
+	static string GetProjection(const vector<string> &columns_to_read);
+	//! The rows of an inlined table that the snapshot sees, in the order of their row ids
+	string InlinedDataQuery(const string &projection, const Identifier &inlined_table_name);
 
 	//! Wrap field selections with list aggregation of struct objects (DBMS-specific)
 	//! For DuckDB: LIST({'key1': val1, 'key2': val2, ...})

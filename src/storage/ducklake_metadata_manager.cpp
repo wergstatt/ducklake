@@ -2450,9 +2450,9 @@ string DuckLakeMetadataManager::GenerateFileListQuery(DuckLakeTableEntry &table,
 		              ", data.row_id_start, data.mapping_id, " + GetDeleteFileSelectList("del") +
 		              ", del.begin_snapshot";
 	} else {
-		select_list = "data.data_file_id, " + GetDataFileSelectList("data") +
+		select_list = "data.data_file_id, del.delete_file_id, data.record_count, " + GetDataFileSelectList("data") +
 		              ", data.row_id_start, data.begin_snapshot, data.partial_max, data.mapping_id, " +
-		              GetDeleteFileSelectList("del") + stats_select_list;
+		              GetDeleteFileSelectList("del") + ", del.begin_snapshot" + stats_select_list;
 	}
 
 	// Add base query
@@ -2481,27 +2481,9 @@ vector<DuckLakeFileListEntry> DuckLakeMetadataManager::GetFilesForTable(DuckLake
                                                                         DuckLakeSnapshot snapshot,
                                                                         const FilterPushdownInfo *filter_info,
                                                                         bool include_local_changes) {
-	auto table_id = table.GetTableId();
-
-	// Top-N dynamic filters order the files by their statistics and check them per file
 	vector<DuckLakeFileListDynamicFilter> dynamic_filter_columns;
 	vector<idx_t> runtime_filter_stats_columns;
-	if (filter_info) {
-		for (auto &entry : filter_info->column_filters) {
-			auto &col_filter = entry.second;
-			auto dynamic_filter_data = ExpressionFilter::GetOptionalDynamicFilterData(*col_filter.table_filter);
-			if (dynamic_filter_data) {
-				ExpressionType comparison_type;
-				{
-					annotated_shared_lock<annotated_shared_mutex> l(dynamic_filter_data->lock);
-					comparison_type = dynamic_filter_data->comparison_type;
-				}
-				dynamic_filter_columns.push_back(
-				    {col_filter.column_field_index, comparison_type, col_filter.column_type});
-				runtime_filter_stats_columns.push_back(col_filter.column_field_index);
-			}
-		}
-	}
+	GetDynamicFilters(filter_info, dynamic_filter_columns, runtime_filter_stats_columns);
 
 	auto query =
 	    GenerateFileListQuery(table, snapshot, filter_info, dynamic_filter_columns, runtime_filter_stats_columns);
@@ -2509,13 +2491,46 @@ vector<DuckLakeFileListEntry> DuckLakeMetadataManager::GetFilesForTable(DuckLake
 	result->ThrowIfError("Failed to get data file list from DuckLake: ");
 
 	// Query inlined file deletions for this table
-	auto inlined_deletions = ReadInlinedFileDeletions(table_id, snapshot, include_local_changes);
+	auto inlined_deletions = ReadInlinedFileDeletions(table.GetTableId(), snapshot, include_local_changes);
+	return ReadFileList(table, snapshot, *result, runtime_filter_stats_columns, inlined_deletions);
+}
 
+void DuckLakeMetadataManager::GetDynamicFilters(const FilterPushdownInfo *filter_info,
+                                                vector<DuckLakeFileListDynamicFilter> &dynamic_filter_columns,
+                                                vector<idx_t> &runtime_filter_stats_columns) {
+	// Top-N dynamic filters order the files by their statistics and check them per file
+	if (!filter_info) {
+		return;
+	}
+	for (auto &entry : filter_info->column_filters) {
+		auto &col_filter = entry.second;
+		auto dynamic_filter_data = ExpressionFilter::GetOptionalDynamicFilterData(*col_filter.table_filter);
+		if (dynamic_filter_data) {
+			ExpressionType comparison_type;
+			{
+				annotated_shared_lock<annotated_shared_mutex> l(dynamic_filter_data->lock);
+				comparison_type = dynamic_filter_data->comparison_type;
+			}
+			dynamic_filter_columns.push_back({col_filter.column_field_index, comparison_type, col_filter.column_type});
+			runtime_filter_stats_columns.push_back(col_filter.column_field_index);
+		}
+	}
+}
+
+vector<DuckLakeFileListEntry> DuckLakeMetadataManager::ReadFileList(DuckLakeTableEntry &table,
+                                                                    DuckLakeSnapshot snapshot, QueryResult &result,
+                                                                    const vector<idx_t> &runtime_filter_stats_columns,
+                                                                    map<idx_t, set<idx_t>> &inlined_deletions) {
 	vector<DuckLakeFileListEntry> files;
-	for (auto &row : *result) {
+	for (auto &row : result) {
 		DuckLakeFileListEntry file_entry;
 		idx_t col_idx = 0;
 		file_entry.file_id = DataFileIndex(row.GetValue<idx_t>(col_idx++));
+		if (!row.IsNull(col_idx)) {
+			file_entry.delete_file_id = DataFileIndex(row.GetValue<idx_t>(col_idx));
+		}
+		col_idx++;
+		file_entry.row_count = row.GetValue<idx_t>(col_idx++);
 		file_entry.file = ReadDataFile(table, row, col_idx, IsEncrypted());
 		file_entry.row_id_start = OptIdx(row, col_idx++);
 		file_entry.snapshot_id = row.GetValue<idx_t>(col_idx++);
@@ -2529,6 +2544,7 @@ vector<DuckLakeFileListEntry> DuckLakeMetadataManager::GetFilesForTable(DuckLake
 		}
 		col_idx++;
 		file_entry.delete_file = ReadDeleteFile(table, row, col_idx, IsEncrypted());
+		file_entry.delete_file_begin_snapshot = OptIdx(row, col_idx++);
 		for (auto &column_field_index : runtime_filter_stats_columns) {
 			DuckLakeFileColumnStats column_stats;
 			column_stats.has_min = TryReadValue(row, col_idx++, column_stats.min);
@@ -4153,17 +4169,24 @@ void DuckLakeMetadataManager::ClearInlinedTableCaches() {
 
 map<idx_t, set<idx_t>> DuckLakeMetadataManager::ReadInlinedFileDeletions(TableIndex table_id, DuckLakeSnapshot snapshot,
                                                                          bool include_local_changes) {
-	map<idx_t, set<idx_t>> result;
 	auto inlined_table_name = GetInlinedDeletionTableName(table_id, snapshot, include_local_changes);
 	if (inlined_table_name.empty()) {
-		return result;
+		return map<idx_t, set<idx_t>>();
 	}
-	auto query = StringUtil::Format("SELECT file_id, row_id FROM {METADATA_CATALOG}.%s WHERE begin_snapshot <= "
-	                                "{SNAPSHOT_ID}",
-	                                inlined_table_name);
-	auto query_result = Query(snapshot, query);
+	auto query_result = Query(snapshot, InlinedFileDeletionsQuery(inlined_table_name));
 	query_result->ThrowIfError("Failed to read inlined file deletions from DuckLake: ");
-	for (auto &row : *query_result) {
+	return ReadInlinedFileDeletions(*query_result);
+}
+
+string DuckLakeMetadataManager::InlinedFileDeletionsQuery(const Identifier &inlined_table_name) {
+	return StringUtil::Format("SELECT file_id, row_id FROM {METADATA_CATALOG}.%s WHERE begin_snapshot <= "
+	                          "{SNAPSHOT_ID}",
+	                          inlined_table_name);
+}
+
+map<idx_t, set<idx_t>> DuckLakeMetadataManager::ReadInlinedFileDeletions(QueryResult &query_result) {
+	map<idx_t, set<idx_t>> result;
+	for (auto &row : query_result) {
 		auto file_id = row.GetValue<idx_t>(0);
 		auto row_id = row.GetValue<idx_t>(1);
 		result[file_id].insert(row_id);
@@ -4279,7 +4302,7 @@ shared_ptr<DuckLakeInlinedData> DuckLakeMetadataManager::TransformInlinedData(Qu
 	return inlined_data;
 }
 
-static string GetProjection(const vector<string> &columns_to_read) {
+string DuckLakeMetadataManager::GetProjection(const vector<string> &columns_to_read) {
 	vector<string> projections;
 	for (idx_t i = 0; i < columns_to_read.size(); i++) {
 		// alias to avoid duplicate name in PG
@@ -4288,19 +4311,21 @@ static string GetProjection(const vector<string> &columns_to_read) {
 	return StringUtil::Join(projections, ", ");
 }
 
-unique_ptr<QueryResult> DuckLakeMetadataManager::ReadInlinedData(DuckLakeSnapshot snapshot,
-                                                                 const Identifier &inlined_table_name,
-                                                                 const vector<string> &columns_to_read) {
-	auto projection = GetProjection(columns_to_read);
+string DuckLakeMetadataManager::InlinedDataQuery(const string &projection, const Identifier &inlined_table_name) {
 	auto col_names = InlinedColNames();
-	auto result = Query(snapshot, StringUtil::Format(R"(
+	return StringUtil::Format(R"(
 SELECT %s
 FROM {METADATA_CATALOG}.%s inlined_data
 WHERE {SNAPSHOT_ID} >= %s AND ({SNAPSHOT_ID} < %s OR %s IS NULL)
 ORDER BY %s ASC;)",
-	                                                 projection, inlined_table_name, col_names.begin_snapshot,
-	                                                 col_names.end_snapshot, col_names.end_snapshot, col_names.row_id));
-	return result;
+	                          projection, inlined_table_name, col_names.begin_snapshot, col_names.end_snapshot,
+	                          col_names.end_snapshot, col_names.row_id);
+}
+
+unique_ptr<QueryResult> DuckLakeMetadataManager::ReadInlinedData(DuckLakeSnapshot snapshot,
+                                                                 const Identifier &inlined_table_name,
+                                                                 const vector<string> &columns_to_read) {
+	return Query(snapshot, InlinedDataQuery(GetProjection(columns_to_read), inlined_table_name));
 }
 
 unique_ptr<QueryResult> DuckLakeMetadataManager::ReadInlinedDataChanges(DuckLakeSnapshot start_snapshot,

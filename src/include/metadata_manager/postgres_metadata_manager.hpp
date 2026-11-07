@@ -53,6 +53,12 @@ public:
 	unique_ptr<QueryResult> ExecuteDropInTransaction(string &query) override;
 	using DuckLakeMetadataManager::Query;
 	vector<unique_ptr<QueryResult>> Query(DuckLakeSnapshot snapshot, const DuckLakeReadBatch &batch) override;
+	//! Reads the file list, the inlined file deletions and the inlined rows of a scan in one round trip
+	vector<DuckLakeFileListEntry> GetFilesForTable(DuckLakeTableEntry &table, DuckLakeSnapshot snapshot,
+	                                               const FilterPushdownInfo *filter_info,
+	                                               bool include_local_changes) override;
+	unique_ptr<QueryResult> ReadInlinedData(DuckLakeSnapshot snapshot, const Identifier &inlined_table_name,
+	                                        const vector<string> &columns_to_read) override;
 
 	void ClearCache() override;
 	//! postgres_scanner looks up a table it has not cached
@@ -86,6 +92,9 @@ private:
 
 	//! The queries of the last Execute, one of which the scanner repeats in front of a server error
 	vector<string> executed_queries;
+	//! The kept results of the inlined rows that a scan read with its file list, by snapshot and inlined table
+	mutex inlined_rows_lock;
+	map<pair<idx_t, string>, string> inlined_rows;
 };
 
 } // namespace duckdb

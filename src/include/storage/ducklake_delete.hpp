@@ -91,6 +91,7 @@ struct DuckLakeDeleteFileWriter {
 
 struct DuckLakeDeleteMap {
 	void AddExtendedFileInfo(DuckLakeFileListExtendedEntry file_entry) {
+		lock_guard<mutex> guard(lock);
 		auto filename = file_entry.file.path;
 		file_map.emplace(std::move(filename), std::move(file_entry));
 	}
