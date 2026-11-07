@@ -29,6 +29,7 @@ public:
 		return false;
 	}
 	bool ShowsConcurrentCommits() const override;
+	bool ExpiresSnapshotsInCommit() const override;
 	bool InsertsInlinedRowsAfterBatch(idx_t row_count, idx_t column_count) const override;
 	idx_t MaxIdentifierLength() const override {
 		return 63;
@@ -54,6 +55,8 @@ public:
 	unique_ptr<QueryResult> ExecuteAndCommit(DuckLakeSnapshot snapshot, const DuckLakeBatch &batch,
 	                                         bool &commit_sent) override;
 	unique_ptr<QueryResult> ExecuteDropInTransaction(string &query) override;
+	optional_idx BatchRowCount(QueryResult &result, idx_t from_end) override;
+	void DropInlinedTablesOfDeletedTables() override;
 
 	void ClearCache() override;
 	//! postgres_scanner looks up a table it has not cached

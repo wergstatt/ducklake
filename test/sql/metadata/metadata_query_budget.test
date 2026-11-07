@@ -392,3 +392,65 @@ getvariable('alter_0') > 0 AND getvariable('alter_0') = getvariable('alter_1'),
 getvariable('expire_0') > 0 AND getvariable('expire_0') = getvariable('expire_1')
 ----
 true	true	true	true	true
+
+# expiries after CREATE OR REPLACE of 2 and of 20 tables, which schedule the files of the replaced tables (#1925)
+loop i 0 2
+
+statement ok
+CREATE TABLE ducklake.replaced_few_{i} AS SELECT {i} AS a
+
+statement ok
+CREATE OR REPLACE TABLE ducklake.replaced_few_{i} AS SELECT {i} AS a
+
+endloop
+
+statement ok
+FROM warm_up()
+
+statement ok
+CALL enable_logging('DuckLakeMetadata')
+
+statement ok
+CALL ducklake_expire_snapshots('ducklake', older_than => now())
+
+statement ok
+SET VARIABLE expire_2_replaced = metadata_queries()
+
+statement ok
+CALL disable_logging()
+
+statement ok
+CALL truncate_duckdb_logs()
+
+loop i 0 20
+
+statement ok
+CREATE TABLE ducklake.replaced_many_{i} AS SELECT {i} AS a
+
+statement ok
+CREATE OR REPLACE TABLE ducklake.replaced_many_{i} AS SELECT {i} AS a
+
+endloop
+
+statement ok
+FROM warm_up()
+
+statement ok
+CALL enable_logging('DuckLakeMetadata')
+
+statement ok
+CALL ducklake_expire_snapshots('ducklake', older_than => now())
+
+statement ok
+SET VARIABLE expire_20_replaced = metadata_queries()
+
+statement ok
+CALL disable_logging()
+
+statement ok
+CALL truncate_duckdb_logs()
+
+query I
+SELECT getvariable('expire_2_replaced') > 0 AND getvariable('expire_2_replaced') = getvariable('expire_20_replaced')
+----
+true

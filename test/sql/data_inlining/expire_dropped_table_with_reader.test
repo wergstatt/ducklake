@@ -1,0 +1,54 @@
+# name: test/sql/data_inlining/expire_dropped_table_with_reader.test
+# description: the inlined data of an expired table stays while a session reads it, and a later expiry drops it
+# group: [data_inlining]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/expire_dropped_table_with_reader', DATA_INLINING_ROW_LIMIT 10)
+
+statement ok
+CREATE TABLE dl.t AS SELECT 1 AS i
+
+statement ok con2
+BEGIN
+
+query I con2
+FROM dl.t
+----
+1
+
+statement ok
+DROP TABLE dl.t
+
+statement ok
+CALL ducklake_expire_snapshots('dl', older_than => now()::TIMESTAMP + INTERVAL 1 DAY)
+
+query I con2
+FROM dl.t
+----
+1
+
+statement ok con2
+COMMIT
+
+statement ok
+CREATE TABLE dl.u AS SELECT 2 AS i
+
+statement ok
+DROP TABLE dl.u
+
+statement ok
+CALL ducklake_expire_snapshots('dl', older_than => now()::TIMESTAMP + INTERVAL 1 DAY)
+
+query II
+SELECT (SELECT count(*) FROM __ducklake_metadata_dl.ducklake_inlined_data_tables),
+  (SELECT count(*) FROM duckdb_tables() WHERE database_name = '__ducklake_metadata_dl' AND table_name LIKE 'ducklake_inlined%')
+----
+0	0

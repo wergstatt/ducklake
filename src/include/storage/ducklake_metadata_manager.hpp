@@ -223,6 +223,10 @@ public:
 	virtual bool CommitsEachStatement() const {
 		return false;
 	}
+	//! Whether an expiry deletes the snapshots, and what only they referenced, in the batch of its commit
+	virtual bool ExpiresSnapshotsInCommit() const {
+		return false;
+	}
 	//! Whether metadata reads inside a transaction can show commits of other transactions
 	virtual bool ShowsConcurrentCommits() const {
 		return CommitsEachStatement();
@@ -337,6 +341,11 @@ public:
 	virtual unique_ptr<QueryResult> ExecuteInTransaction(string &query);
 	//! Runs statements that drop metadata tables atomically, failing where the drop would wait for their readers
 	virtual unique_ptr<QueryResult> ExecuteDropInTransaction(string &query);
+	//! The rows that the statement at the given position from the end of the batch of the result changed, where the
+	//! result tells
+	virtual optional_idx BatchRowCount(QueryResult &result, idx_t from_end) {
+		return optional_idx();
+	}
 
 	virtual unique_ptr<QueryResult> Query(DuckLakeSnapshot snapshot, string &query);
 	virtual unique_ptr<QueryResult> Query(string &query);
@@ -648,11 +657,25 @@ public:
 	                                      const case_insensitive_map_t<DuckLakeSnapshotTagInfo> &dropped);
 	//! Ends the row of a committed tag at the snapshot of the commit
 	static string EndSnapshotTagSql(const DuckLakeSnapshotTagInfo &tag);
-	static string DeleteSnapshotsSql(const vector<DuckLakeSnapshotInfo> &snapshots);
+	static DuckLakeBatch DeleteSnapshotsSql(const vector<DuckLakeSnapshotInfo> &snapshots);
 	//! Deletes the snapshots once the caller checked the catalog version
 	virtual void DeleteSnapshots(const vector<DuckLakeSnapshotInfo> &snapshots);
 	//! Deletes the metadata that only the deleted snapshots referenced, once the caller checked the catalog version
 	virtual void CleanupExpiredSnapshots(const vector<DuckLakeSnapshotInfo> &snapshots);
+	//! The statements that delete what no remaining snapshot references, after the snapshots were deleted, and
+	//! schedule its files for deletion; the inlined tables are those whose expired rows they delete. With
+	//! expired_tables_from_end, sets the position of the statement that deletes tables, counted from the end
+	DuckLakeBatch ExpiredSnapshotsCleanupSql(const vector<Identifier> &inlined_tables,
+	                                         optional_ptr<idx_t> expired_tables_from_end = nullptr);
+	//! The cleanup after expired snapshots that ends the batch of the commit that deletes them, for every inlined
+	//! table. The inlined tables of the tables it deletes stay, for DropInlinedTablesOfDeletedTables after the commit
+	DuckLakeBatch ExpiredSnapshotsCommitCleanup(idx_t &expired_tables_from_end);
+	//! Drops the inlined tables of the given tables, and their registrations
+	static DuckLakeBatch DropInlinedTablesSql(const set<TableIndex> &tables, const vector<Identifier> &inlined_tables);
+	//! Drops the registered inlined tables of tables that no longer exist, after the commit of an expiry that deleted
+	//! tables in its batch
+	virtual void DropInlinedTablesOfDeletedTables() {
+	}
 	virtual vector<DuckLakeTableSizeInfo> GetTableSizes(DuckLakeSnapshot snapshot);
 	//! The tables with data files that are not dropped
 	unordered_set<idx_t> GetTablesWithLiveDataFiles();
@@ -754,7 +777,6 @@ protected:
 	DuckLakePath GetRelativePath(const string &path, const string &data_path);
 	string FromRelativePath(const DuckLakePath &path, const string &base_path);
 	string FromRelativePath(const DuckLakePath &path);
-	string FromRelativePath(TableIndex table_id, const DuckLakePath &path);
 	string GetPath(TableIndex table_id, const vector<DuckLakeTableInfo> &new_tables,
 	               const vector<DuckLakeSchemaInfo> &new_schemas_result);
 	FileSystem &GetFileSystem();

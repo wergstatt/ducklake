@@ -428,6 +428,8 @@ private:
 	set<idx_t> TaggedSnapshotsInternal();
 	vector<DuckLakeSnapshotInfo> ExpirableSnapshotsInternal(const string &filter);
 	vector<DuckLakeSnapshotInfo> ExpireSnapshotsNow(const string &filter);
+	//! Whether the expiry statements select the snapshots and leave their deletion to the batch of the commit
+	bool DefersExpiryToCommit();
 	//! Whether the expiry time of the tag has passed at the start of the transaction
 	bool SnapshotTagExpired(const DuckLakeSnapshotTagInfo &tag) const;
 	//! Fails when the expiry time has passed at the start of the transaction

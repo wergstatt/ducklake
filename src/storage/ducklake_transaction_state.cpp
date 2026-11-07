@@ -2860,10 +2860,12 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 				// write the new snapshot, with the ids that the changes took
 				batch_queries = DuckLakeMetadataManager::InsertSnapshotSql(commit_snapshot);
 				batch_queries += std::move(changes);
+				if (!expired_snapshots.empty()) {
+					batch_queries += context.expired_snapshots_cleanup();
+				}
 			}
 			// where nothing runs after the batch, it can carry the COMMIT of the metadata transaction
-			auto res = context.execute_commit_batch(commit_snapshot, batch_queries,
-			                                        expired_snapshots.empty() ? &commit_sent : nullptr);
+			auto res = context.execute_commit_batch(commit_snapshot, batch_queries, &commit_sent);
 			if (res->HasError()) {
 				auto &commit_error = res->GetErrorObject();
 				retryable_metadata_error = context.is_retryable_metadata_error(commit_error.RawMessage());

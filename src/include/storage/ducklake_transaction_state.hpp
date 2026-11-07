@@ -40,6 +40,11 @@ struct DuckLakeCommitContext {
 	std::function<void(const vector<DuckLakeSnapshotInfo> &)> cleanup_expired_snapshots =
 	    [](const vector<DuckLakeSnapshotInfo> &) {
 	    };
+	//! The statements that delete what only the expired snapshots referenced, where the batch that deletes them can
+	//! carry them
+	std::function<DuckLakeBatch()> expired_snapshots_cleanup = []() {
+		return DuckLakeBatch();
+	};
 	//! Whether expiring snapshots is the only change of the transaction
 	bool only_expires_snapshots = false;
 	//! Rewrites the delete files whose new deletes are not dated to the commit snapshot.

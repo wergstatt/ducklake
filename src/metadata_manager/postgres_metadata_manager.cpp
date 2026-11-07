@@ -240,6 +240,11 @@ bool PostgresMetadataManager::ShowsConcurrentCommits() const {
 	       StringUtil::CIEquals(isolation_level->second.ToString(), "READ COMMITTED");
 }
 
+bool PostgresMetadataManager::ExpiresSnapshotsInCommit() const {
+	// the commit of an expiry writes a snapshot that lists them, and its batch runs as one on the server
+	return transaction.GetCatalog().RecordsExpiredSnapshots();
+}
+
 //! The function of postgres_scanner that runs statements with their parameters in one round trip, if it has one
 static optional_ptr<CatalogEntry> PipelineFunction(ClientContext &context) {
 	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
@@ -629,6 +634,57 @@ unique_ptr<QueryResult> PostgresMetadataManager::ExecuteDropInTransaction(string
 	// gives up instead and leaves the table to a later cleanup
 	auto batch = "CALL postgres_execute({METADATA_CATALOG_NAME_LITERAL}, 'SET LOCAL lock_timeout = 1');\n" + query;
 	return ExecuteInTransaction(batch);
+}
+
+void PostgresMetadataManager::DropInlinedTablesOfDeletedTables() {
+	auto &connection = transaction.GetConnection();
+	// the read and the drops in one transaction, which the batch of the drops commits
+	connection.BeginTransaction();
+	auto result = Query(R"(
+SELECT table_id, table_name
+FROM {METADATA_CATALOG}.ducklake_inlined_data_tables AS tbl
+WHERE NOT EXISTS (
+    SELECT 1 FROM {METADATA_CATALOG}.ducklake_table t
+    WHERE t.table_id = tbl.table_id
+);)");
+	set<TableIndex> tables;
+	vector<Identifier> inlined_tables;
+	if (!result->HasError()) {
+		for (auto &row : *result) {
+			tables.insert(TableIndex(row.GetValue<idx_t>(0)));
+			inlined_tables.push_back(row.GetValue<Identifier>(1));
+		}
+	}
+	if (!result->HasError() && !tables.empty()) {
+		// as ExecuteDropInTransaction, a drop that would wait for a reader of the table leaves it to a later expiry
+		DuckLakeBatch drop("SET LOCAL lock_timeout = 1;");
+		drop += DropInlinedTablesSql(tables, inlined_tables);
+		bool commit_sent = false;
+		result = ExecuteAndCommit(DuckLakeSnapshot(), drop, commit_sent);
+		if (!result->HasError()) {
+			ClearCache();
+		}
+	}
+	if (result->HasError()) {
+		connection.Rollback();
+		result->ThrowIfError("Failed to drop the inlined-data tables of deleted tables in DuckLake: ");
+	}
+	connection.Commit();
+}
+
+optional_idx PostgresMetadataManager::BatchRowCount(QueryResult &result, idx_t from_end) {
+	// a pipeline gives the rows that each of its statements changed, without its COMMIT
+	if (result.HasError() || result.ColumnCount() == 0 || result.GetNames()[0] != "rowcount") {
+		return optional_idx();
+	}
+	vector<idx_t> row_counts;
+	for (auto &row : result) {
+		row_counts.push_back(row.GetValue<idx_t>(0));
+	}
+	if (from_end == 0 || from_end > row_counts.size()) {
+		return optional_idx();
+	}
+	return row_counts[row_counts.size() - from_end];
 }
 
 void PostgresMetadataManager::ClearCache() {
