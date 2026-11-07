@@ -505,9 +505,15 @@ idx_t DuckLakeCatalog::GetBeginSnapshotForSchemaVersion(TableIndex table_id, idx
 
 optional_ptr<DuckLakeTableEntry> DuckLakeCatalog::GetTableAtSchemaVersion(DuckLakeTransaction &transaction,
                                                                           TableIndex table_id, idx_t schema_version) {
-	DuckLakeSnapshot snapshot(GetBeginSnapshotForSchemaVersion(table_id, schema_version, transaction), schema_version,
-	                          0, 0);
-	auto entry = GetEntryById(transaction, snapshot, table_id);
+	// the cache needs only the schema version, loading the schema also its begin snapshot
+	auto schema = GetObjectCacheInstance().Get<DuckLakeSchemaCacheEntry>(SchemaCacheKey(schema_version));
+	if (!schema) {
+		DuckLakeSnapshot snapshot(GetBeginSnapshotForSchemaVersion(table_id, schema_version, transaction),
+		                          schema_version, 0, 0);
+		schema = GetSchemaCacheEntry(transaction, snapshot);
+	}
+	auto entry = schema->catalog_set.GetEntryById(table_id);
+	transaction.PinSchemaCacheEntry(std::move(schema));
 	if (!entry) {
 		// LCOV_EXCL_START
 		return nullptr;
