@@ -95,6 +95,35 @@ DuckLakeInlinedDataReader::ReadCommittedRows(DuckLakeFunctionInfo &read_info, co
 	return result;
 }
 
+shared_ptr<DuckLakeCommittedInlinedRows>
+DuckLakeInlinedDataReader::ReadRowsForFlush(DuckLakeFunctionInfo &read_info,
+                                            const DuckLakeInlinedTableInfo &inlined_table) {
+	vector<MultiFileColumnDefinition> columns;
+	if (!DuckLakeMultiFileReader::GetInlinedTableColumns(read_info, inlined_table.schema_version, columns)) {
+		// LCOV_EXCL_START
+		throw InternalException("Failed to find the columns of inlined table %s", inlined_table.table_name);
+		// LCOV_EXCL_STOP
+	}
+	auto transaction = read_info.GetTransaction();
+	auto &metadata_manager = transaction->GetMetadataManager();
+	auto col_names = metadata_manager.InlinedColNames();
+	auto result = make_shared_ptr<DuckLakeCommittedInlinedRows>();
+	vector<LogicalType> types;
+	for (auto &col : columns) {
+		string column;
+		LogicalType type;
+		GetColumnToRead(read_info, metadata_manager, col_names, col, column, type);
+		result->columns.push_back(std::move(column));
+		types.push_back(std::move(type));
+	}
+	result->columns.push_back(SQLIdentifier::ToString(col_names.end_snapshot));
+	types.push_back(LogicalType::BIGINT);
+	auto query_result = metadata_manager.ReadAllInlinedDataForFlush(
+	    read_info.snapshot, inlined_table.table_name, read_info.table, read_info.flush_sort_order_sql, result->columns);
+	result->rows = metadata_manager.TransformInlinedData(*query_result, types, inlined_table.table_name);
+	return result;
+}
+
 //! Select the columns from rows read before, or return nullptr when one of them was not read
 static shared_ptr<DuckLakeInlinedData> ProjectCommittedRows(ClientContext &context,
                                                             const DuckLakeCommittedInlinedRows &committed_rows,

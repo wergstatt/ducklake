@@ -1,0 +1,36 @@
+# name: test/sql/data_inlining/inlined_table_from_catalog.test
+# description: An inlined insert takes its inlined data table from the catalog instead of reading it at commit
+# group: [data_inlining]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/inlined_table_from_catalog')
+
+statement ok
+CREATE TABLE ducklake.t (i INTEGER)
+
+statement ok
+INSERT INTO ducklake.t VALUES (1)
+
+statement ok
+CALL enable_logging('DuckLakeMetadata')
+
+statement ok
+INSERT INTO ducklake.t VALUES (2)
+
+statement ok
+CALL disable_logging()
+
+query II
+SELECT count(*) > 0, count(*) FILTER (WHERE query LIKE '%ducklake_inlined_data_tables%'
+    AND NOT contains(query, 'SELECT snapshot_id'))
+FROM duckdb_logs_parsed('DuckLakeMetadata')
+----
+true	0

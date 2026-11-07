@@ -1,0 +1,40 @@
+# name: test/sql/settings/set_option_lock_read_batch_postgres.test
+# description: on PostgreSQL the commit of an option counts its rows in the pipeline that locks the options
+# group: [settings]
+
+require ducklake
+
+require parquet
+
+require postgres_scanner
+
+require-env DUCKLAKE_CI
+
+require-env DUCKLAKE_CONNECTION
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/set_option_lock_read_batch_postgres')
+
+statement ok
+CREATE TABLE dl.t (i INTEGER)
+
+statement ok
+CALL enable_logging('DuckLakeMetadata', storage = 'memory')
+
+statement ok
+CALL dl.set_option('data_inlining_row_limit', 0, table_name => 't')
+
+query I
+SELECT count(*) = 1
+  OR NOT EXISTS (SELECT 1 FROM duckdb_functions() WHERE function_name = 'postgres_pipeline_result')
+FROM duckdb_logs_parsed('DuckLakeMetadata')
+WHERE contains(query, 'SET value = value') AND contains(query, 'COUNT(*)')
+----
+true
+
+query I
+SELECT value FROM dl.options() WHERE option_name = 'data_inlining_row_limit' AND scope_entry = 'main.t'
+----
+0

@@ -1,0 +1,41 @@
+# name: test/sql/transaction/commit_reads_without_waiting_postgres.test
+# description: on PostgreSQL DuckLake attaches its metadata so that a transaction that only read does not wait for its COMMIT, unless the attach says otherwise
+# group: [transaction]
+
+require ducklake
+
+require parquet
+
+require postgres_scanner
+
+require-env DUCKLAKE_CONNECTION postgres:dbname=ducklakedb
+
+test-env DATA_PATH {TEST_DIR}
+
+# a postgres extension without the option rejects it
+statement maybe
+ATTACH 'dbname=ducklakedb' AS probe (TYPE postgres, COMMIT_READS_WITHOUT_WAITING true)
+----
+Unrecognized option
+
+statement ok
+CALL enable_logging('DuckLakeMetadata', storage = 'memory')
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/commit_reads_without_waiting_postgres')
+
+statement maybe
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS waits (DATA_PATH '{DATA_PATH}/commit_reads_without_waiting_postgres', META_COMMIT_READS_WITHOUT_WAITING false)
+----
+Unrecognized option
+
+# the attach of the metadata asks for it where the extension has it, and an explicit option wins
+query II
+SELECT
+  bool_and(contains(query, 'commit_reads_without_waiting true')) FILTER (NOT contains(query, 'waits'))
+    = EXISTS (SELECT 1 FROM duckdb_databases() WHERE database_name = 'probe'),
+  count(*) FILTER (contains(query, 'waits') AND contains(query, 'commit_reads_without_waiting true'))
+FROM duckdb_logs_parsed('DuckLakeMetadata')
+WHERE starts_with(query, 'ATTACH')
+----
+true	0

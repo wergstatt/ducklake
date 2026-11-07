@@ -306,6 +306,21 @@ DuckLakeMultiFileReader::InitializeGlobalState(ClientContext &context, const Mul
 	                                                     deletion_scan_file_row_number_col);
 }
 
+//! What a delete from the file needs to know about it
+static DuckLakeFileListExtendedEntry DeleteFileInfo(const DuckLakeFileListEntry &file_entry) {
+	DuckLakeFileListExtendedEntry result;
+	result.file_id = file_entry.file_id;
+	result.delete_file_id = file_entry.delete_file_id;
+	result.file = file_entry.file;
+	result.delete_file = file_entry.delete_file;
+	result.row_id_start = file_entry.row_id_start;
+	result.delete_file_begin_snapshot = file_entry.delete_file_begin_snapshot;
+	result.row_count = file_entry.row_count;
+	result.mapping_id = file_entry.mapping_id;
+	result.data_type = file_entry.data_type;
+	return result;
+}
+
 ReaderInitializeType DuckLakeMultiFileReader::InitializeReader(MultiFileReaderData &reader_data,
                                                                const MultiFileBindData &bind_data,
                                                                const vector<MultiFileColumnDefinition> &global_columns,
@@ -325,6 +340,10 @@ ReaderInitializeType DuckLakeMultiFileReader::InitializeReader(MultiFileReaderDa
 		if (CanSkipFileByRuntimeFilter(file_entry, filter_info, context)) {
 			return ReaderInitializeType::SKIP_READING_FILE;
 		}
+	}
+	if (delete_map) {
+		// the delete takes what it needs about the file from the file list of the scan
+		delete_map->AddExtendedFileInfo(DeleteFileInfo(file_entry));
 	}
 	if (!file_list.IsDeleteScan()) {
 		// regular scan - read the deletes from the delete file (if any) and apply the max row count
@@ -437,10 +456,25 @@ ReaderInitializeType DuckLakeMultiFileReader::InitializeReader(MultiFileReaderDa
 	return result;
 }
 
+//! Whether the table of the scan has the columns of an inlined data table of the schema version
+static bool HasInlinedTableColumns(DuckLakeFunctionInfo &read_info, idx_t schema_version) {
+	auto &table = read_info.table;
+	if (table.IsTransactionLocal() || schema_version > read_info.snapshot.schema_version) {
+		// an altered table, or a scan of an older snapshot that also reads the inlined tables of later versions
+		return false;
+	}
+	if (schema_version == read_info.snapshot.schema_version) {
+		return true;
+	}
+	auto transaction = read_info.GetTransaction();
+	auto schema_versions = transaction->GetCatalog().GetTableSchemaVersions(*transaction, table.GetTableId());
+	return DuckLakeTableEntry::IsCurrentInlinedDataTable(schema_version, schema_versions.last_change);
+}
+
 bool DuckLakeMultiFileReader::GetInlinedTableColumns(DuckLakeFunctionInfo &read_info, optional_idx schema_version,
                                                      vector<MultiFileColumnDefinition> &columns) {
 	reference<DuckLakeTableEntry> schema_table = read_info.table;
-	if (schema_version.IsValid()) {
+	if (schema_version.IsValid() && !HasInlinedTableColumns(read_info, schema_version.GetIndex())) {
 		// read the table at the specified version
 		auto transaction = read_info.GetTransaction();
 		auto &catalog = transaction->GetCatalog();

@@ -1,0 +1,28 @@
+# name: test/sql/metadata/attach_reads_metadata_once.test
+# description: Attaching a DuckLake reads ducklake_metadata once, and an empty metadata catalog still gets a new DuckLake
+# group: [metadata]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/attach_reads_metadata_once')
+
+statement ok
+DETACH ducklake
+
+statement ok
+CALL enable_logging('DuckLakeMetadata')
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE query LIKE '%.ducklake_metadata%'
+----
+1

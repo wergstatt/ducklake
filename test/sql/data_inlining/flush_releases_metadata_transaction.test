@@ -1,0 +1,36 @@
+# name: test/sql/data_inlining/flush_releases_metadata_transaction.test
+# description: A flush reads the inlined table and commits in two metadata transactions, holding none while it writes
+# group: [data_inlining]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/flush_releases_metadata_transaction', DATA_INLINING_ROW_LIMIT 10)
+
+statement ok
+CREATE TABLE ducklake.t (i INTEGER)
+
+statement ok
+INSERT INTO ducklake.t VALUES (1)
+
+statement ok
+CALL enable_logging('QueryLog')
+
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
+
+statement ok
+CALL disable_logging()
+
+query I
+SELECT count(DISTINCT transaction_id) FROM duckdb_logs
+  WHERE type = 'QueryLog' AND (message LIKE '%ducklake_inlined_data_1_1%' OR message LIKE '%ducklake_snapshot VALUES%'
+    OR message LIKE '%postgres_execute_pipeline%')
+----
+2

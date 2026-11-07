@@ -62,6 +62,12 @@ struct FlushedInlinedTableInfo {
 	bool wrote_files = true;
 };
 
+//! An inlined data table that one of a newer schema version of its table supersedes
+struct SupersededInlinedTableInfo {
+	TableIndex table_id;
+	DuckLakeInlinedTableInfo inlined_table;
+};
+
 struct DroppedDataFileStats {
 	idx_t row_count = 0;
 	idx_t file_size_bytes = 0;
@@ -287,9 +293,9 @@ public:
 	void MarkDeleteAttempted(TableIndex table_id);
 
 	//! The snapshots the criterion selects that no tag protects, as the transaction sees them
-	vector<DuckLakeSnapshotInfo> ExpirableSnapshots(const string &filter);
+	vector<DuckLakeSnapshotInfo> ExpirableSnapshots(const DuckLakeStatement &filter);
 	//! Expires the snapshots the criterion selects and returns them
-	vector<DuckLakeSnapshotInfo> ExpireSnapshots(const string &filter);
+	vector<DuckLakeSnapshotInfo> ExpireSnapshots(const DuckLakeStatement &filter);
 	//! Whether the commit writes a snapshot for the expiry of the transaction
 	bool ExpiresSnapshotsOnCommit() const;
 	void RemoveFilesScheduledForCleanup(const vector<DuckLakeFileForCleanup> &files);
@@ -298,6 +304,8 @@ public:
 	void MarkMetadataWritten();
 	//! Marks the inlined data flushed up to the snapshot, the commit deletes its rows
 	void MarkInlinedDataForDeletion(DuckLakeInlinedTableInfo inlined_table, idx_t flush_snapshot_id, bool wrote_files);
+	//! Marks a superseded inlined data table that a flush empties, the commit drops it once it is empty
+	void MarkSupersededInlinedTableFlushed(TableIndex table_id, DuckLakeInlinedTableInfo inlined_table);
 	bool InlinedTableFlushed(const Identifier &table_name);
 	//! Marks the inlined file deletions of the table flushed up to the snapshot, the commit deletes them
 	void MarkInlinedFileDeletionsFlushed(TableIndex table_id, idx_t flush_snapshot_id);
@@ -398,11 +406,16 @@ private:
 	optional_idx EarlierConfigOptionChange(const DuckLakeConfigOption &option, idx_t change_index) const;
 	//! The rows an option is expected to have after a set, which an earlier change of the option decides
 	idx_t ConfigOptionRows(idx_t change_index, idx_t written_rows) const;
-	//! Whether other commits wrote rows of the options this transaction changed, which READ COMMITTED shows
-	bool ConfigOptionsWrittenByOthers();
+	//! The changes that are the last of their option, which decide the rows it has
+	vector<idx_t> LastConfigOptionChanges() const;
+	//! Whether other commits wrote rows of the options this transaction changed, which READ COMMITTED shows, from the
+	//! counts of the last changes: the rows of the option, then those with its value unless it was reset
+	bool ConfigOptionsWrittenByOthers(vector<unique_ptr<QueryResult>> &counts);
 	//! Writes the options of the transaction again, after a failed commit attempt rolled them back
 	void RewriteConfigOptions();
 	void ClearMaintenanceChanges();
+	//! The deletes of the files that the transaction cleaned up from the schedule, which its commit sends
+	DuckLakeBatch RemoveCleanedUpFilesSql();
 	static DuckLakePartitionInfo GetNewPartitionKey(DuckLakeCommitState &commit_state, DuckLakeTableEntry &table);
 	static DuckLakeSortInfo GetNewSortKey(DuckLakeCommitState &commit_state, DuckLakeTableEntry &table);
 	static DuckLakeTableInfo GetNewTable(DuckLakeCommitState &commit_state, DuckLakeTableEntry &table);
@@ -416,7 +429,9 @@ private:
 	//! The committed tag that matches the name and this transaction did not drop
 	optional_ptr<const DuckLakeSnapshotTagInfo> FindCommittedSnapshotTag(const string &name,
 	                                                                     vector<DuckLakeSnapshotTagInfo> &tags);
-	vector<DuckLakeSnapshotTagInfo> GetSnapshotTagsInternal(bool with_snapshot_time = true);
+	//! The committed tags this transaction did not drop or expire, and the tags it created
+	vector<DuckLakeSnapshotTagInfo> GetSnapshotTagsInternal(vector<DuckLakeSnapshotTagInfo> committed,
+	                                                        bool with_snapshot_time);
 	//! Fails when the expiry of this transaction removes the snapshot a tag is to name
 	void CheckNotExpiredInTransaction(idx_t snapshot_id);
 	//! Expires what a tag change releases, when an expiry of this transaction ran in its statements
@@ -425,15 +440,28 @@ private:
 	DuckLakeSnapshotTagInfo LiveSnapshotTag(const string &name);
 	//! Makes the changed tag the one the transaction commits for the live tag
 	void ChangeSnapshotTag(const DuckLakeSnapshotTagInfo &tag, DuckLakeSnapshotTagInfo changed);
-	set<idx_t> TaggedSnapshotsInternal();
-	vector<DuckLakeSnapshotInfo> ExpirableSnapshotsInternal(const string &filter);
-	vector<DuckLakeSnapshotInfo> ExpireSnapshotsNow(const string &filter);
+	//! The live tags read once, split into the snapshots that unexpired tags protect and the tags that have expired
+	struct SnapshotTagSplit {
+		set<idx_t> protected_snapshots;
+		vector<DuckLakeSnapshotTagInfo> expired;
+	};
+	SnapshotTagSplit SplitSnapshotTagsInternal(vector<DuckLakeSnapshotTagInfo> committed);
+	//! The tags, the snapshots each criterion selects that no tag protects and, if requested, the inlined data
+	//! tables, read in one batch
+	struct ExpiryReads {
+		SnapshotTagSplit tags;
+		vector<vector<DuckLakeSnapshotInfo>> expirable;
+		vector<Identifier> inlined_tables;
+	};
+	ExpiryReads ReadExpiryInternal(const vector<DuckLakeStatement> &filters, bool inlined_tables = false);
+	vector<DuckLakeSnapshotInfo> ExpirableSnapshotsInternal(const DuckLakeStatement &filter);
+	vector<DuckLakeSnapshotInfo> ExpireSnapshotsNow(const DuckLakeStatement &filter);
+	//! Whether the expiry statements select the snapshots and leave their deletion to the batch of the commit
+	bool DefersExpiryToCommit();
 	//! Whether the expiry time of the tag has passed at the start of the transaction
 	bool SnapshotTagExpired(const DuckLakeSnapshotTagInfo &tag) const;
 	//! Fails when the expiry time has passed at the start of the transaction
 	void CheckSnapshotTagExpiry(const string &name, const Value &expires_at) const;
-	//! The live tags whose expiry time has passed, which an expiry drops
-	vector<DuckLakeSnapshotTagInfo> ExpiredSnapshotTagsInternal();
 	//! What the commit attempt expires, what the statements expired for the first attempt
 	DuckLakeExpiry ExpiredSnapshotsForCommit(idx_t attempt, idx_t latest_snapshot_id);
 	bool ChangesMadeBesidesExpiry() const;
@@ -460,7 +488,9 @@ private:
 	//! The tag functions of one statement execute in parallel
 	mutex snapshot_tag_lock;
 	//! The expiry criteria of this transaction, applied by its commit
-	vector<string> expiry_filters;
+	vector<DuckLakeStatement> expiry_filters;
+	//! The inlined data tables, read with the expiry whose cleanup the batch of the commit carries
+	vector<Identifier> expiry_inlined_tables;
 	//! The snapshots the statements of this transaction expired, and the latest snapshot the first expiry saw
 	vector<DuckLakeSnapshotInfo> expired_in_transaction;
 	optional_idx expiry_snapshot_id;
@@ -501,7 +531,7 @@ private:
 	mutex maintenance_lock;
 	//! Whether the metadata transaction expired snapshots
 	bool expired_in_metadata_transaction = false;
-	//! The files the metadata transaction removed from the deletion schedule
+	//! The files that the commit removes from the deletion schedule
 	vector<DuckLakeFileForCleanup> cleaned_up_files;
 
 	atomic<idx_t> catalog_version;

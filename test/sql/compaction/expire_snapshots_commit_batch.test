@@ -1,0 +1,44 @@
+# name: test/sql/compaction/expire_snapshots_commit_batch.test
+# description: an expiry cleans up after the snapshots with the COMMIT of its batch, and drops the inlined tables of the tables it deletes
+# group: [compaction]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/expire_snapshots_commit_batch', DATA_INLINING_ROW_LIMIT 10)
+
+statement ok
+CREATE TABLE dl.t AS SELECT 1 AS i
+
+statement ok
+DROP TABLE dl.t
+
+statement ok
+CALL enable_logging('DuckLakeMetadata', storage = 'memory')
+
+statement ok
+CALL ducklake_expire_snapshots('dl', older_than => now()::TIMESTAMP + INTERVAL 1 DAY)
+
+statement ok
+CALL disable_logging()
+
+# where a batch carries the COMMIT, the snapshot deletes, the cleanup and the COMMIT are one query
+query I
+SELECT count(*) FILTER (query LIKE '%ducklake_snapshot WHERE snapshot_id IN%ducklake_files_scheduled_for_deletion%COMMIT') = 1
+  OR count(*) FILTER (query LIKE '%COMMIT') = 0
+FROM duckdb_logs_parsed('DuckLakeMetadata')
+----
+true
+
+query III
+SELECT (SELECT count(*) FROM __ducklake_metadata_dl.ducklake_table),
+  (SELECT count(*) FROM __ducklake_metadata_dl.ducklake_inlined_data_tables),
+  (SELECT count(*) FROM duckdb_tables() WHERE database_name = '__ducklake_metadata_dl' AND table_name LIKE 'ducklake_inlined%')
+----
+0	0	0

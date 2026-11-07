@@ -10,6 +10,7 @@
 #include "duckdb/common/vector/list_vector.hpp"
 #include "duckdb/common/vector/struct_vector.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 
 namespace duckdb {
 
@@ -239,6 +240,11 @@ bool PostgresMetadataManager::ShowsConcurrentCommits() const {
 	       StringUtil::CIEquals(isolation_level->second.ToString(), "READ COMMITTED");
 }
 
+bool PostgresMetadataManager::ExpiresSnapshotsInCommit() const {
+	// the commit of an expiry writes a snapshot that lists them, and its batch runs as one on the server
+	return transaction.GetCatalog().RecordsExpiredSnapshots();
+}
+
 //! The function of postgres_scanner with this name, if it has one
 static optional_ptr<CatalogEntry> ScannerFunction(ClientContext &context, const string &name) {
 	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
@@ -374,7 +380,8 @@ string PostgresMetadataManager::GetColumnTypeInternal(const LogicalType &column_
 	}
 }
 
-optional_idx PostgresMetadataManager::BatchServerErrorStart(const string &message) const {
+optional_idx PostgresMetadataManager::BatchServerErrorStart(const string &message,
+                                                            optional_ptr<idx_t> failed_query) const {
 	// the batch and the server error can contain any text, so the batch is found by its size
 	// the scanner names a failed statement "query", or in a pipeline by its position, and then quotes it
 	const string failed_batch = "Failed to execute ";
@@ -387,10 +394,14 @@ optional_idx PostgresMetadataManager::BatchServerErrorStart(const string &messag
 		return optional_idx();
 	}
 	batch_start++;
-	for (auto &query : executed_queries) {
+	for (idx_t i = 0; i < executed_queries.size(); i++) {
+		auto &query = executed_queries[i];
 		auto batch_end = batch_start + query.size();
 		if (batch_end + 3 <= message.size() && message.compare(batch_start, query.size(), query) == 0 &&
 		    message.compare(batch_end, 3, "\": ") == 0) {
+			if (failed_query) {
+				*failed_query = i;
+			}
 			return batch_end;
 		}
 	}
@@ -400,6 +411,27 @@ optional_idx PostgresMetadataManager::BatchServerErrorStart(const string &messag
 string PostgresMetadataManager::CommitErrorWithoutQuery(const string &message) const {
 	auto server_error_start = BatchServerErrorStart(message);
 	return server_error_start.IsValid() ? message.substr(server_error_start.GetIndex()) : message;
+}
+
+bool PostgresMetadataManager::FailedBeforeCommit(const string &message) const {
+	idx_t failed_query = 0;
+	auto server_error_start = BatchServerErrorStart(message, failed_query);
+	// the server may fail a COMMIT, such as by ending the session, after it took effect
+	if (!server_error_start.IsValid() || executed_queries[failed_query] == "COMMIT") {
+		return false;
+	}
+	// the scanner can say in front of the failed query that the COMMIT went out before it lost the connection
+	if (StringUtil::Contains(message.substr(0, message.find("Failed to execute ")), "SQLSTATE")) {
+		return false;
+	}
+	// the server stops the pipeline at a statement that it fails, so the COMMIT after it does not run. The scanner
+	// gives the error of the server with its SQLSTATE, and that of a lost connection without one
+	auto server_error = message.substr(server_error_start.GetIndex());
+	StringUtil::RTrim(server_error);
+	const string sqlstate = "(SQLSTATE ";
+	auto sqlstate_start = server_error.rfind(sqlstate);
+	return sqlstate_start != string::npos && sqlstate_start + sqlstate.size() + 6 == server_error.size() &&
+	       server_error.back() == ')';
 }
 
 bool PostgresMetadataManager::IsRetryableCommitError(const string &message) const {
@@ -558,13 +590,37 @@ vector<unique_ptr<QueryResult>> PostgresMetadataManager::Query(DuckLakeSnapshot 
 vector<string> PostgresMetadataManager::KeepResults(DuckLakeSnapshot snapshot, const DuckLakeReadBatch &batch) {
 	auto pipeline = ExecutePipeline(snapshot, batch.GetReads(), true);
 	pipeline->ThrowIfError("Failed to read the DuckLake metadata: ");
+	return KeptResultScans(*pipeline);
+}
+
+vector<string> PostgresMetadataManager::KeptResultScans(QueryResult &pipeline) {
 	auto catalog_literal = SQLString::ToString(transaction.GetCatalog().MetadataDatabaseName().GetIdentifierName());
 	vector<string> scans;
-	for (auto &row : *pipeline) {
-		scans.push_back(
-		    StringUtil::Format("FROM postgres_pipeline_result(%s, %d)", catalog_literal, row.GetValue<int64_t>(1)));
+	for (auto &row : pipeline) {
+		// a write keeps no result
+		if (!row.IsNull(1)) {
+			scans.push_back(StringUtil::Format("FROM postgres_pipeline_result(%s, %d)", catalog_literal,
+			                                   row.GetValue<int64_t>(1)));
+		}
 	}
 	return scans;
+}
+
+unique_ptr<QueryResult> PostgresMetadataManager::ExecuteAndQuery(DuckLakeSnapshot snapshot, const string &writes,
+                                                                 const DuckLakeReadBatch &reads,
+                                                                 vector<unique_ptr<QueryResult>> &results) {
+	if (!ScannerFunction(*transaction.GetConnection().context, "postgres_pipeline_result")) {
+		return DuckLakeMetadataManager::ExecuteAndQuery(snapshot, writes, reads, results);
+	}
+	auto statements = DuckLakeBatch(writes).SplitStatements();
+	statements.insert(statements.end(), reads.GetReads().begin(), reads.GetReads().end());
+	auto pipeline = ExecutePipeline(snapshot, statements, true);
+	if (!pipeline->HasError()) {
+		for (auto &scan : KeptResultScans(*pipeline)) {
+			results.push_back(transaction.ExecuteRaw(scan));
+		}
+	}
+	return pipeline;
 }
 
 //! Adds a read of every metadata table of the catalog with its filter, and returns the tables in the order of the reads
@@ -628,6 +684,32 @@ DuckLakeCatalogInfo PostgresMetadataManager::BuildCatalog(DuckLakeSnapshot snaps
 		    return DuckLakeMetadataManager::Query(s, "WITH " + StringUtil::Join(results, ", ") + query);
 	    },
 	    ducklake_catalog.DataPath(), ducklake_catalog.Separator(), ducklake_catalog.SupportsV1_1Metadata());
+}
+
+//! Whether the pipeline of postgres_scanner can end with the COMMIT of its transaction
+static bool PipelineCommits(ClientContext &context) {
+	auto pipeline = PipelineFunction(context);
+	if (!pipeline) {
+		return false;
+	}
+	auto &functions = pipeline->Cast<TableFunctionCatalogEntry>().functions;
+	for (idx_t i = 0; i < functions.Size(); i++) {
+		auto options = functions.GetFunctionByOffset(i)->GetSignature().GetTypedKwargs();
+		if (options && options->Find(Identifier("commit"))) {
+			return true;
+		}
+	}
+	return false;
+}
+
+unique_ptr<QueryResult> PostgresMetadataManager::ExecuteAndCommit(DuckLakeSnapshot snapshot, const DuckLakeBatch &batch,
+                                                                  bool &commit_sent) {
+	if (!PipelineCommits(*transaction.GetConnection().context)) {
+		return Execute(snapshot, batch);
+	}
+	DuckLakeBatch pipeline("SET LOCAL extra_float_digits = 3");
+	pipeline += batch;
+	return ExecutePipeline(snapshot, pipeline.SplitStatements(), false, commit_sent);
 }
 
 //! The snapshot id of the latest snapshot
@@ -764,9 +846,121 @@ bool PostgresMetadataManager::HoldsGlobalTableStats(DuckLakeSnapshot snapshot) {
 	return read_ahead_stats && read_ahead_stats->first == snapshot.snapshot_id;
 }
 
+vector<DuckLakeFileListEntry> PostgresMetadataManager::GetFilesForTable(DuckLakeTableEntry &table,
+                                                                        DuckLakeSnapshot snapshot,
+                                                                        const FilterPushdownInfo *filter_info,
+                                                                        bool include_local_changes) {
+	if (!ScannerFunction(*transaction.GetConnection().context, "postgres_pipeline_result")) {
+		return DuckLakeMetadataManager::GetFilesForTable(table, snapshot, filter_info, include_local_changes);
+	}
+	vector<DuckLakeFileListDynamicFilter> dynamic_filter_columns;
+	vector<idx_t> runtime_filter_stats_columns;
+	GetDynamicFilters(filter_info, dynamic_filter_columns, runtime_filter_stats_columns);
+	DuckLakeReadBatch reads;
+	auto schema = SQLQuotedIdentifier::ToString(transaction.GetCatalog().MetadataSchemaName());
+	reads.Add(
+	    {DuckLakeMetadataManager::GenerateFileListQuery(table, snapshot, filter_info, dynamic_filter_columns,
+	                                                    runtime_filter_stats_columns, FileListType::SCAN, schema)});
+	auto deletion_table = GetInlinedDeletionTableName(table.GetTableId(), snapshot, include_local_changes);
+	if (!deletion_table.empty()) {
+		reads.Add({InlinedFileDeletionsQuery(deletion_table)});
+	}
+	// the scan reads the inlined rows later, from the kept result and with the columns it needs then
+	auto inlined_tables = table.GetInlinedDataTables(transaction, snapshot, include_local_changes);
+	for (auto &inlined_table : inlined_tables) {
+		reads.Add({InlinedDataQuery("*", inlined_table.table_name)});
+	}
+	auto scans = KeepResults(snapshot, reads);
+	auto file_list = transaction.ExecuteRaw(scans[0]);
+	file_list->ThrowIfError("Failed to get data file list from DuckLake: ");
+	idx_t next_scan = 1;
+	map<idx_t, set<idx_t>> inlined_deletions;
+	if (!deletion_table.empty()) {
+		auto deletions = transaction.ExecuteRaw(scans[next_scan++]);
+		deletions->ThrowIfError("Failed to read inlined file deletions from DuckLake: ");
+		inlined_deletions = ReadInlinedFileDeletions(*deletions);
+	}
+	{
+		lock_guard<mutex> guard(inlined_rows_lock);
+		for (auto &inlined_table : inlined_tables) {
+			inlined_rows[{snapshot.snapshot_id, inlined_table.table_name.GetIdentifierName()}] = scans[next_scan++];
+		}
+	}
+	return ReadFileList(table, snapshot, *file_list, runtime_filter_stats_columns, inlined_deletions);
+}
+
+unique_ptr<QueryResult> PostgresMetadataManager::ReadInlinedData(DuckLakeSnapshot snapshot,
+                                                                 const Identifier &inlined_table_name,
+                                                                 const vector<string> &columns_to_read) {
+	string scan;
+	{
+		lock_guard<mutex> guard(inlined_rows_lock);
+		auto entry = inlined_rows.find({snapshot.snapshot_id, inlined_table_name.GetIdentifierName()});
+		if (entry != inlined_rows.end()) {
+			scan = std::move(entry->second);
+			inlined_rows.erase(entry);
+		}
+	}
+	if (!scan.empty()) {
+		auto result =
+		    transaction.ExecuteRaw(StringUtil::Format("SELECT %s FROM (%s) inlined_data ORDER BY %s",
+		                                              GetProjection(columns_to_read), scan, InlinedColNames().row_id));
+		if (!result->HasError()) {
+			return result;
+		}
+		// a type that a kept result cannot hold fails to bind, and the table is read as before
+	}
+	return DuckLakeMetadataManager::ReadInlinedData(snapshot, inlined_table_name, columns_to_read);
+}
+
+void PostgresMetadataManager::ReadInlinedTablesForFlush(DuckLakeSnapshot snapshot,
+                                                        const vector<Identifier> &inlined_table_names) {
+	if (inlined_table_names.empty() ||
+	    !ScannerFunction(*transaction.GetConnection().context, "postgres_pipeline_result")) {
+		return;
+	}
+	DuckLakeReadBatch reads;
+	for (auto &table_name : inlined_table_names) {
+		reads.Add({StringUtil::Format("SELECT * FROM {METADATA_CATALOG}.%s WHERE %s <= $1", table_name,
+		                              InlinedColNames().begin_snapshot),
+		           {Value::BIGINT(NumericCast<int64_t>(snapshot.snapshot_id))}});
+	}
+	auto scans = KeepResults(snapshot, reads);
+	lock_guard<mutex> guard(flush_rows_lock);
+	for (idx_t i = 0; i < inlined_table_names.size(); i++) {
+		flush_rows[{snapshot.snapshot_id, inlined_table_names[i].GetIdentifierName()}] = scans[i];
+	}
+}
+
+unique_ptr<QueryResult> PostgresMetadataManager::ReadAllInlinedDataForFlush(DuckLakeSnapshot snapshot,
+                                                                            const Identifier &inlined_table_name,
+                                                                            const DuckLakeTableEntry &table,
+                                                                            const string &sort_order_sql,
+                                                                            const vector<string> &columns_to_read) {
+	string scan;
+	{
+		lock_guard<mutex> guard(flush_rows_lock);
+		auto entry = flush_rows.find({snapshot.snapshot_id, inlined_table_name.GetIdentifierName()});
+		if (entry != flush_rows.end()) {
+			scan = std::move(entry->second);
+			flush_rows.erase(entry);
+		}
+	}
+	if (!scan.empty()) {
+		auto result = ReadInlinedRowsForFlush(snapshot, inlined_table_name, table, sort_order_sql, columns_to_read,
+		                                      "(" + scan + ")");
+		if (!result->HasError()) {
+			return result;
+		}
+		// a type that a kept result cannot hold fails to bind, and the table is read as before
+	}
+	return DuckLakeMetadataManager::ReadAllInlinedDataForFlush(snapshot, inlined_table_name, table, sort_order_sql,
+	                                                           columns_to_read);
+}
+
 unique_ptr<QueryResult> PostgresMetadataManager::ExecutePipeline(DuckLakeSnapshot snapshot,
                                                                  const vector<DuckLakeStatement> &batch,
-                                                                 bool keep_results) {
+                                                                 bool keep_results, optional_ptr<bool> commit_sent) {
 	auto &ducklake_catalog = transaction.GetCatalog();
 	auto schema_identifier = SQLQuotedIdentifier::ToString(ducklake_catalog.MetadataSchemaName());
 	vector<Value> statements;
@@ -785,16 +979,26 @@ unique_ptr<QueryResult> PostgresMetadataManager::ExecutePipeline(DuckLakeSnapsho
 		    Value::STRUCT({{"query", Value(query)}, {"params", Value::LIST(LogicalType::VARCHAR, std::move(params))}}));
 		queries.push_back(std::move(query));
 	}
+	if (commit_sent) {
+		// the scanner names the COMMIT that it sends after the statements by its query
+		queries.push_back("COMMIT");
+	}
 	auto logged_query = StringUtil::Join(queries, ";\n");
 	if (!keep_results) {
 		// only the error of a commit is looked up in its queries, while reads can run on several threads at once
 		executed_queries = std::move(queries);
 	}
+	if (commit_sent) {
+		// from here on, a lost connection leaves it unknown whether the COMMIT took effect
+		*commit_sent = true;
+	}
 	auto catalog_literal = SQLString::ToString(ducklake_catalog.MetadataDatabaseName().GetIdentifierName());
+	string options = keep_results ? ", keep_results := true" : "";
+	options += commit_sent ? ", commit := true" : "";
 	// the values stay out of the query, and so out of its logs
-	return transaction.ExecuteRaw(StringUtil::Format("FROM postgres_execute_pipeline(%s, $1%s)", catalog_literal,
-	                                                 keep_results ? ", keep_results := true" : ""),
-	                              {Value::LIST(std::move(statements))}, logged_query);
+	return transaction.ExecuteRaw(
+	    StringUtil::Format("FROM postgres_execute_pipeline(%s, $1%s)", catalog_literal, options),
+	    {Value::LIST(std::move(statements))}, logged_query);
 }
 
 unique_ptr<QueryResult> PostgresMetadataManager::ExecuteDropInTransaction(string &query) {
@@ -804,36 +1008,113 @@ unique_ptr<QueryResult> PostgresMetadataManager::ExecuteDropInTransaction(string
 	return ExecuteInTransaction(batch);
 }
 
+void PostgresMetadataManager::DropInlinedTablesOfDeletedTables() {
+	auto &connection = transaction.GetConnection();
+	// the read and the drops in one transaction, which the batch of the drops commits
+	connection.BeginTransaction();
+	auto result = Query(R"(
+SELECT table_id, table_name
+FROM {METADATA_CATALOG}.ducklake_inlined_data_tables AS tbl
+WHERE NOT EXISTS (
+    SELECT 1 FROM {METADATA_CATALOG}.ducklake_table t
+    WHERE t.table_id = tbl.table_id
+);)");
+	set<TableIndex> tables;
+	vector<Identifier> inlined_tables;
+	if (!result->HasError()) {
+		for (auto &row : *result) {
+			tables.insert(TableIndex(row.GetValue<idx_t>(0)));
+			inlined_tables.push_back(row.GetValue<Identifier>(1));
+		}
+	}
+	if (!result->HasError() && !tables.empty()) {
+		// as ExecuteDropInTransaction, a drop that would wait for a reader of the table leaves it to a later expiry
+		DuckLakeBatch drop("SET LOCAL lock_timeout = 1;");
+		drop += DropInlinedTablesSql(tables, inlined_tables);
+		bool commit_sent = false;
+		result = ExecuteAndCommit(DuckLakeSnapshot(), drop, commit_sent);
+		if (!result->HasError()) {
+			ClearCache();
+		}
+	}
+	if (result->HasError()) {
+		connection.Rollback();
+		result->ThrowIfError("Failed to drop the inlined-data tables of deleted tables in DuckLake: ");
+	}
+	connection.Commit();
+}
+
+optional_idx PostgresMetadataManager::BatchRowCount(QueryResult &result, idx_t from_end) {
+	// a pipeline gives the rows that each of its statements changed, without its COMMIT
+	if (result.HasError() || result.ColumnCount() == 0 || result.GetNames()[0] != "rowcount") {
+		return optional_idx();
+	}
+	vector<idx_t> row_counts;
+	for (auto &row : result) {
+		row_counts.push_back(row.GetValue<idx_t>(0));
+	}
+	if (from_end == 0 || from_end > row_counts.size()) {
+		return optional_idx();
+	}
+	return row_counts[row_counts.size() - from_end];
+}
+
+unique_ptr<QueryResult> PostgresMetadataManager::Query(const DuckLakeStatement &query) {
+	auto sql = query.sql;
+	SubstituteCatalogPlaceholders(sql);
+	// as those of the commit, the values stay out of the text of the read, and so out of its log
+	return transaction.ExecuteRaw(sql, query.params, sql);
+}
+
 void PostgresMetadataManager::ClearCache() {
 	// clear the cache of the metadata catalog alone, a global clear breaks queries running in other Postgres catalogs
 	auto &catalog = transaction.GetCatalog();
 	if (catalog.ScopedCacheClear()) {
 		auto catalog_literal = SQLString::ToString(catalog.MetadataDatabaseName().GetIdentifierName());
-		auto result = transaction.ExecuteRaw(StringUtil::Format(
-		    "SELECT * FROM postgres_query(%s, 'SELECT 1', clear_catalog_cache = true);", catalog_literal));
-		if (!result->HasError()) {
-			return;
+		// without a query where the postgres_scanner can, else with one
+		for (auto clear : {"CALL postgres_clear_cache(catalog := %s);",
+		                   "SELECT * FROM postgres_query(%s, 'SELECT 1', clear_catalog_cache = true);"}) {
+			auto result = transaction.ExecuteRaw(StringUtil::Format(clear, catalog_literal));
+			if (!result->HasError()) {
+				return;
+			}
+			// the error of a postgres_scanner from before the parameter
+			if (!StringUtil::Contains(result->GetError(), "Invalid named parameter")) {
+				result->ThrowIfError("Failed to clear the PostgreSQL metadata cache: ");
+			}
 		}
-		// the error of a postgres_scanner from before the option, which can only clear every catalog
-		if (!StringUtil::Contains(result->GetError(), "Invalid named parameter \"clear_catalog_cache\"")) {
-			result->ThrowIfError("Failed to clear the PostgreSQL metadata cache: ");
-		}
+		// a postgres_scanner from before both can only clear every catalog
 		catalog.SetScopedCacheClear(false);
 	}
 	auto result = transaction.ExecuteRaw("CALL postgres_clear_cache();");
 	result->ThrowIfError("Failed to clear the PostgreSQL metadata cache: ");
 }
 
-static string PostgresQuery(const string &remote_query) {
-	return StringUtil::Format("SELECT * FROM postgres_query({METADATA_CATALOG_NAME_LITERAL}, %s)",
-	                          SQLString(remote_query));
+//! Whether postgres_query can run a query at bind, which saves the round trip that describes it
+static bool QueriesRunAtBind(ClientContext &context) {
+	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
+	auto &schema = Catalog::GetSystemCatalog(context).GetSchema(transaction, Identifier::DefaultSchema());
+	auto entry = schema.GetEntry(transaction, CatalogType::TABLE_FUNCTION_ENTRY, Identifier("postgres_query"));
+	if (!entry) {
+		return false;
+	}
+	auto &functions = entry->Cast<TableFunctionCatalogEntry>().functions.functions;
+	return std::any_of(functions.begin(), functions.end(), [](const shared_ptr<const TableFunction> &function) {
+		auto options = function->GetSignature().GetTypedKwargs();
+		return options && options->Find(Identifier("execute_in_bind"));
+	});
+}
+
+static string PostgresQuery(ClientContext &context, const string &remote_query) {
+	return StringUtil::Format("SELECT * FROM postgres_query({METADATA_CATALOG_NAME_LITERAL}, %s%s)",
+	                          SQLString(remote_query), QueriesRunAtBind(context) ? ", execute_in_bind := true" : "");
 }
 
 string PostgresMetadataManager::GetLatestSnapshotQuery() const {
 	auto remote_query = LatestSnapshotQuery();
 	SubstituteCatalogPlaceholders(remote_query,
 	                              SQLQuotedIdentifier::ToString(transaction.GetCatalog().MetadataSchemaName()));
-	return PostgresQuery(remote_query);
+	return PostgresQuery(*transaction.GetConnection().context, remote_query);
 }
 
 string PostgresMetadataManager::GetSnapshotAndStatsAndChangesQuery(DuckLakeSnapshot snapshot,
@@ -843,7 +1124,7 @@ string PostgresMetadataManager::GetSnapshotAndStatsAndChangesQuery(DuckLakeSnaps
 	SubstituteCatalogPlaceholders(remote_query,
 	                              SQLQuotedIdentifier::ToString(transaction.GetCatalog().MetadataSchemaName()));
 	SubstituteSnapshotPlaceholders(snapshot, remote_query);
-	return PostgresQuery(remote_query);
+	return PostgresQuery(*transaction.GetConnection().context, remote_query);
 }
 
 bool PostgresMetadataManager::MaterializeStatsCTEs() const {
@@ -861,7 +1142,7 @@ string PostgresMetadataManager::GenerateFileListQuery(DuckLakeTableEntry &table,
 	    table, snapshot, filter_info, dynamic_filters, runtime_filter_stats_columns, file_list_type, schema);
 	// placeholders inside the literal are not replaced later
 	SubstituteSnapshotPlaceholders(snapshot, remote_query);
-	return PostgresQuery(remote_query);
+	return PostgresQuery(*transaction.GetConnection().context, remote_query);
 }
 
 } // namespace duckdb

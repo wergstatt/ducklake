@@ -465,6 +465,9 @@ public:
 	void CacheTableSchemaVersions(idx_t schema_version, const map<TableIndex, map<idx_t, idx_t>> &begin_snapshots);
 	//! What this DuckLake cached of the snapshots it read
 	DuckLakeCachedReadKeys GetCachedReadKeys();
+	//! Cache the schema versions that a commit wrote for its tables, at the schema version of the commit
+	void CacheCommittedSchemaVersions(idx_t schema_version,
+	                                  const map<TableIndex, DuckLakeTableSchemaVersions> &committed_versions);
 	//! Look up the cached begin snapshot of a (table, schema version) pair, if it has been resolved before
 	optional_idx TryGetSchemaVersionBeginSnapshot(TableIndex table_id, idx_t schema_version);
 	//! Cache the begin snapshot of a committed (table, schema version) pair. The row that backs it is written

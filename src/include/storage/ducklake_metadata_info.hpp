@@ -329,6 +329,14 @@ struct DuckLakeSnapshotTagInfo {
 	Value expires_at = Value(LogicalType::TIMESTAMP_TZ);
 };
 
+//! What an expiry reads from the metadata catalog
+struct DuckLakeExpiryReads {
+	vector<DuckLakeSnapshotTagInfo> tags;
+	//! The snapshots that each filter selects
+	vector<vector<DuckLakeSnapshotInfo>> snapshots;
+	vector<Identifier> inlined_tables;
+};
+
 //! What the expiries of a transaction delete in a commit attempt
 struct DuckLakeExpiry {
 	vector<DuckLakeSnapshotInfo> snapshots;
@@ -433,6 +441,10 @@ struct DuckLakeFileListEntry {
 	DuckLakeDataType data_type = DuckLakeDataType::DATA_FILE;
 	//! The data file id
 	DataFileIndex file_id;
+	//! The delete file, its first snapshot and the row count of the data file, for a delete from it
+	DataFileIndex delete_file_id;
+	optional_idx delete_file_begin_snapshot;
+	idx_t row_count = 0;
 	//! Inlined file deletions (row positions that have been deleted and stored in the metadata database)
 	set<idx_t> inlined_file_deletions;
 	//! Column min/max values for runtime filter pushdown

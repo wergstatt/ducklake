@@ -22,7 +22,7 @@ CALL postgres_execute('pg', 'DROP SCHEMA IF EXISTS attach_cache_clear, attach_ca
 
 statement ok
 CREATE MACRO cache_clears() AS (
-	SELECT count(*) FROM duckdb_logs WHERE type = 'QueryLog' AND message LIKE '%clear_catalog_cache = true%'
+	SELECT count(*) FROM duckdb_logs WHERE type = 'QueryLog' AND message LIKE '%postgres_clear_cache(catalog := %'
 )
 
 # postgres_scanner loads the tables of a schema with one query on pg_namespace
@@ -41,6 +41,12 @@ ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/attach_cac
 
 query I
 SELECT cache_clears()
+----
+1
+
+# it sends the statements that create the metadata tables in one request
+query I
+SELECT count(*) FROM duckdb_logs_parsed('PostgresQueryLog') WHERE query LIKE '%CREATE TABLE%'
 ----
 1
 

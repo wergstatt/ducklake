@@ -1,0 +1,37 @@
+# name: test/sql/compaction/expire_snapshots_read_batch_postgres.test
+# description: on PostgreSQL an expiry reads the tags, the snapshots and the inlined tables as one pipeline
+# group: [compaction]
+
+require ducklake
+
+require parquet
+
+require postgres_scanner
+
+require-env DUCKLAKE_CI
+
+require-env DUCKLAKE_CONNECTION
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/expire_snapshots_read_batch_postgres')
+
+statement ok
+CREATE TABLE dl.t (i INTEGER)
+
+statement ok
+CALL enable_logging('DuckLakeMetadata', storage = 'memory')
+
+query I
+SELECT snapshot_id FROM ducklake_expire_snapshots('dl', versions => [0])
+----
+0
+
+query I
+SELECT count(*) = 1 AND bool_and(contains(query, 'ducklake_inlined_data_tables'))
+  OR NOT EXISTS (SELECT 1 FROM duckdb_functions() WHERE function_name = 'postgres_pipeline_result')
+FROM duckdb_logs_parsed('DuckLakeMetadata')
+WHERE contains(query, 'tag_name')
+----
+true

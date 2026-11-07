@@ -40,13 +40,20 @@ struct DuckLakeCommitContext {
 	std::function<void(const vector<DuckLakeSnapshotInfo> &)> cleanup_expired_snapshots =
 	    [](const vector<DuckLakeSnapshotInfo> &) {
 	    };
+	//! The statements that delete what only the expired snapshots referenced, where the batch that deletes them can
+	//! carry them
+	std::function<DuckLakeBatch()> expired_snapshots_cleanup = []() {
+		return DuckLakeBatch();
+	};
 	//! Whether expiring snapshots is the only change of the transaction
 	bool only_expires_snapshots = false;
 	//! Rewrites the delete files whose new deletes are not dated to the commit snapshot.
 	std::function<void(idx_t)> set_delete_commit_snapshot = [](idx_t) {
 	};
-	//! Executes the batched snapshot/changes SQL against the metadata DB.
-	std::function<unique_ptr<QueryResult>(DuckLakeSnapshot, const DuckLakeBatch &)> execute_commit_batch;
+	//! Executes the batched snapshot/changes SQL against the metadata DB. With commit_sent, the batch can carry the
+	//! COMMIT of the metadata transaction, and sets commit_sent before that goes out
+	std::function<unique_ptr<QueryResult>(DuckLakeSnapshot, const DuckLakeBatch &, optional_ptr<bool> commit_sent)>
+	    execute_commit_batch;
 	//! Classifies metadata-catalog errors that are safe to retry.
 	std::function<bool(const string &)> is_retryable_metadata_error = [](const string &) {
 		return false;
@@ -54,6 +61,10 @@ struct DuckLakeCommitContext {
 	//! The commit error without the failed query text that it repeats.
 	std::function<string(const string &)> commit_error_without_query = [](const string &message) {
 		return message;
+	};
+	//! Whether the error of a batch that carried the COMMIT stopped it before the COMMIT.
+	std::function<bool(const string &)> failed_before_commit = [](const string &) {
+		return false;
 	};
 	//! Advice for a commit error that is not retried.
 	std::function<string(const string &)> commit_error_hint = [](const string &) {
@@ -73,11 +84,18 @@ struct DuckLakeCommitContext {
 	//! Resets per-attempt state before a retry.
 	std::function<void()> prepare_retry = []() {
 	};
+	//! Keeps the latest snapshot that the conflict check of a retry read, so that the retry does not read it again.
+	std::function<void(DuckLakeSnapshot)> set_retry_snapshot = [](DuckLakeSnapshot) {
+	};
 	//! Throws when a failed attempt of the transaction cannot be retried.
 	std::function<void()> verify_retry = []() {
 	};
 	//! Writes again what the transaction wrote to the metadata before its commit, in a retried attempt.
 	std::function<void()> rewrite_before_retry = []() {
+	};
+	//! The deletes of the files that the transaction cleaned up from the deletion schedule, which each attempt sends.
+	std::function<DuckLakeBatch()> remove_cleaned_up_files = []() {
+		return DuckLakeBatch();
 	};
 	//! Whether the failed attempt ends the commit, also when another attempt could succeed.
 	std::function<bool()> skip_retry = []() {
@@ -122,6 +140,10 @@ struct DuckLakeCommitContext {
 	};
 	//! Returns the current global table stats for a single table id (first-attempt path).
 	std::function<shared_ptr<DuckLakeTableStats>(TableIndex)> get_table_stats;
+	//! Data path of a table in the loaded catalog, empty for a table that it does not hold.
+	std::function<string(TableIndex)> get_table_path = [](TableIndex) {
+		return string();
+	};
 	//! Top-level columns of a table at the commit snapshot — needed by stats-refresh to iterate
 	//! columns and look up types when merging per-file stats.
 	std::function<vector<DuckLakeColumnSchemaEntry>(TableIndex)> get_table_column_schema = [](TableIndex) {
@@ -158,6 +180,10 @@ struct DuckLakeCommitContext {
 	//! Publishes the options of newly created tables onto the catalog.
 	std::function<void(const vector<DuckLakeConfigOption> &)> set_table_options =
 	    [](const vector<DuckLakeConfigOption> &) {
+	    };
+	//! Keeps the schema versions that the commit wrote for its tables on the catalog.
+	std::function<void(idx_t, const map<TableIndex, DuckLakeTableSchemaVersions> &)> set_table_schema_versions =
+	    [](idx_t, const map<TableIndex, DuckLakeTableSchemaVersions> &) {
 	    };
 	//! Invalidates the cached stats entry for a table after a stats-affecting file drop.
 	std::function<void(idx_t, TableIndex)> invalidate_table_stats_cache = [](idx_t, TableIndex) {
@@ -284,7 +310,8 @@ public:
 	static DuckLakeFileInfo GetNewDataFile(const DuckLakeDataFile &file, DuckLakeCommitState &commit_state,
 	                                       TableIndex table_id, optional_idx row_id_start);
 
-	static void DropEmptySupersededInlinedTables(const DuckLakeCommitContext &context);
+	static void DropEmptySupersededInlinedTables(const DuckLakeCommitContext &context,
+	                                             const vector<SupersededInlinedTableInfo> &candidates);
 
 	void CleanupFiles();
 
@@ -320,9 +347,13 @@ public:
 	map<SchemaIndex, reference<DuckLakeSchemaEntry>> dropped_schemas;
 	LocalTableChanges local_changes;
 	vector<FlushedInlinedTableInfo> flushed_inlined_tables;
+	//! The flushed inlined tables that a newer one of their table supersedes
+	vector<SupersededInlinedTableInfo> superseded_inlined_tables;
 	//! The tables whose inlined file deletions were flushed, with the snapshot of the flush
 	map<TableIndex, idx_t> flushed_inlined_file_deletions;
 	vector<DuckLakeConfigOption> committed_table_options;
+	//! The schema versions of the tables that this commit writes a schema version for, the creation if it creates them
+	map<TableIndex, DuckLakeTableSchemaVersions> committed_schema_versions;
 	//! The statistics written for the fields that this commit adds to existing tables
 	map<TableIndex, map<FieldIndex, DuckLakeColumnStats>> added_field_stats;
 	//! The tables whose stored size this commit reads back from their live data files

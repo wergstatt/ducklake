@@ -1,0 +1,48 @@
+# name: test/sql/compaction/merge_adjacent_lone_file.test
+# description: Merging adjacent files reads no schema of an older schema version for a table with a single file
+# group: [compaction]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/merge_adjacent_lone_file', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE ducklake.t (i INTEGER);
+
+statement ok
+INSERT INTO ducklake.t VALUES (1);
+
+# a newer schema version, so the file of t has an older one
+statement ok
+CREATE TABLE ducklake.u (i INTEGER);
+
+statement ok
+FROM ducklake.u
+
+statement ok
+CALL enable_logging('DuckLakeMetadata')
+
+statement ok
+CALL ducklake_merge_adjacent_files('ducklake')
+
+statement ok
+CALL disable_logging()
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('DuckLakeMetadata')
+WHERE (regexp_matches(query, 'schema_version\s*=\s*\d') OR contains(query, 'ducklake_column'))
+  AND NOT contains(query, 'next_catalog_id')
+----
+0
+
+query I
+SELECT * FROM ducklake.t
+----
+1

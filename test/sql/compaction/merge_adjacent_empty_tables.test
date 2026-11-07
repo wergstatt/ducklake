@@ -51,9 +51,9 @@ CALL disable_logging()
 
 # the one compaction file list query filters the partition values by its table
 query II
-SELECT count(*), count(*) FILTER (WHERE query LIKE '%ducklake_file_partition_value where table_id=%')
+SELECT count(*), count(*) FILTER (WHERE query LIKE '%where data.table_id = %')
 FROM (SELECT lower(regexp_replace(query, '\s+', ' ', 'g')) AS query FROM duckdb_logs_parsed('DuckLakeMetadata'))
-WHERE query LIKE '%array_agg(partition_value%'
+WHERE query LIKE '%pv.partition_value%'
 ----
 1	1
 

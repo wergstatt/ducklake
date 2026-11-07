@@ -36,7 +36,7 @@ statement ok
 CALL truncate_duckdb_logs()
 
 statement ok
-CALL enable_logging('QueryLog', storage = 'memory')
+CALL enable_logging('DuckLakeMetadata', storage = 'memory')
 
 query I
 SELECT count(*) FROM lake.t WHERE a >= 12 AND b < 50 AND c > 30
@@ -49,9 +49,9 @@ CALL disable_logging()
 # Postgres would otherwise inline the stats into nested loops that read them again for every file
 query I
 SELECT CASE WHEN (SELECT catalog_type FROM ducklake_settings('lake')) = 'postgres' THEN
-    (SELECT count(*) > 0 FROM duckdb_logs
-     WHERE type = 'QueryLog' AND message LIKE '%col_1_stats AS MATERIALIZED (%'
-       AND message LIKE '%col_2_stats AS MATERIALIZED (%' AND message LIKE '%col_3_stats AS MATERIALIZED (%')
+    (SELECT count(*) > 0 FROM duckdb_logs_parsed('DuckLakeMetadata')
+     WHERE query LIKE '%col_1_stats AS MATERIALIZED (%'
+       AND query LIKE '%col_2_stats AS MATERIALIZED (%' AND query LIKE '%col_3_stats AS MATERIALIZED (%')
     ELSE true END
 ----
 true
@@ -66,7 +66,7 @@ statement ok
 CALL truncate_duckdb_logs()
 
 statement ok
-CALL enable_logging('QueryLog', storage = 'memory')
+CALL enable_logging('DuckLakeMetadata', storage = 'memory')
 
 query I
 SELECT count(*) FROM lake.t WHERE a >= 12
@@ -78,8 +78,8 @@ CALL disable_logging()
 
 query I
 SELECT CASE WHEN (SELECT catalog_type FROM ducklake_settings('lake')) = 'postgres' THEN
-    (SELECT count(*) > 0 FROM duckdb_logs
-     WHERE type = 'QueryLog' AND message LIKE '%col_1_stats AS (%' AND message NOT LIKE '%MATERIALIZED%')
+    (SELECT count(*) > 0 FROM duckdb_logs_parsed('DuckLakeMetadata')
+     WHERE query LIKE '%col_1_stats AS (%' AND query NOT LIKE '%MATERIALIZED%')
     ELSE true END
 ----
 true

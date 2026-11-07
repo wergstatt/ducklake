@@ -84,7 +84,11 @@ public:
 	                  Binder &binder, TableIndex table_id, uint64_t max_files, DuckLakeMergeAdjacentOptions options);
 	DuckLakeCompactor(ClientContext &context, DuckLakeCatalog &catalog, DuckLakeTransaction &transaction,
 	                  Binder &binder, TableIndex table_id, uint64_t max_files, double delete_threshold);
-	void GenerateCompactions(DuckLakeTableEntry &table, vector<unique_ptr<LogicalOperator>> &compactions);
+	//! Adds the reads of the files of the table to the batch
+	void AddReads(DuckLakeTableEntry &table, DuckLakeReadBatch &reads);
+	//! Generates the compactions of the table from the results of the batch
+	void GenerateCompactions(DuckLakeTableEntry &table, vector<unique_ptr<QueryResult>> &results,
+	                         vector<unique_ptr<LogicalOperator>> &compactions);
 	unique_ptr<LogicalOperator> GenerateCompactionCommand(vector<DuckLakeCompactionFileEntry> source_files,
 	                                                      bool bind_to_latest_schema = false);
 	//! Sort the scan of a schema version of the table by the sort of its latest version
@@ -119,6 +123,12 @@ private:
 	DuckLakeMergeAdjacentOptions options;
 
 	CompactionType type;
+	DuckLakeSnapshot snapshot;
+	idx_t target_file_size = 0;
+	//! The inlined deletions of the files that a rewrite considers
+	map<idx_t, set<idx_t>> inlined_deletions;
+	//! The position of the first read of the table in the batch
+	idx_t first_read = 0;
 };
 
 } // namespace duckdb

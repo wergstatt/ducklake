@@ -28,7 +28,8 @@ public:
 	                      shared_ptr<DuckLakeInlinedData> transaction_local_data,
 	                      unique_ptr<FilterPushdownInfo> filter_info = nullptr);
 	DuckLakeMultiFileList(DuckLakeFunctionInfo &read_info, vector<DuckLakeFileListEntry> files_to_scan);
-	DuckLakeMultiFileList(DuckLakeFunctionInfo &read_info, const DuckLakeInlinedTableInfo &inlined_table);
+	DuckLakeMultiFileList(DuckLakeFunctionInfo &read_info, const DuckLakeInlinedTableInfo &inlined_table,
+	                      shared_ptr<DuckLakeCommittedInlinedRows> inlined_rows);
 
 	unique_ptr<MultiFileList> DynamicFilterPushdown(MultiFileDynamicPushdownInfo &pushdown_info) const override;
 

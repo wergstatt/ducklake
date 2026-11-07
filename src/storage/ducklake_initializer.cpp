@@ -30,7 +30,10 @@ DuckLakeInitializer::DuckLakeInitializer(ClientContext &context, DuckLakeCatalog
 	InitializeDataPath();
 }
 
-string DuckLakeInitializer::GetAttachOptions() {
+//! The Postgres attach option that sends the COMMIT of a transaction that only read without waiting for its reply
+static constexpr const char *COMMIT_READS_WITHOUT_WAITING = "commit_reads_without_waiting";
+
+string DuckLakeInitializer::GetAttachOptions(bool commit_reads_without_waiting) {
 	vector<string> attach_options;
 	const string metadata_type = catalog.MetadataType();
 	// Quack does not enforce read-only attaches and newer versions reject them, the DuckLake catalog refuses writes
@@ -58,6 +61,13 @@ string DuckLakeInitializer::GetAttachOptions() {
 	bool user_set_schema = options.metadata_parameters.find("schema") != options.metadata_parameters.end();
 	if (is_postgres && !user_set_schema && !options.metadata_schema.empty()) {
 		attach_options.push_back("SCHEMA " + SQLString::ToString(options.metadata_schema.GetIdentifierName()));
+	}
+	// a transaction that only read has its results whatever its COMMIT replies, so it need not wait for the reply
+	// an explicit META_COMMIT_READS_WITHOUT_WAITING takes precedence over this
+	bool user_set_commit =
+	    options.metadata_parameters.find(COMMIT_READS_WITHOUT_WAITING) != options.metadata_parameters.end();
+	if (is_postgres && commit_reads_without_waiting && !user_set_commit) {
+		attach_options.push_back(string(COMMIT_READS_WITHOUT_WAITING) + " true");
 	}
 	if (options.hide_metadata_catalog) {
 		attach_options.push_back("HIDDEN true");
@@ -91,8 +101,9 @@ void DuckLakeInitializer::Initialize() {
 	// directly query a known ducklake metadata table to avoid scanning all attached catalogs via duckdb_tables()
 	// this prevents a corrupted ducklake catalog from blocking initialization of unrelated ducklake databases
 	// FIXME: verify that all ducklake tables are in the correct format
-	if (transaction.GetMetadataManager().MetadataExists()) {
-		LoadExistingDuckLakeWithRetries(transaction);
+	auto metadata = transaction.GetMetadataManager().TryLoadDuckLake();
+	if (metadata) {
+		LoadExistingDuckLakeWithRetries(transaction, std::move(metadata));
 	} else {
 		if (!options.create_if_not_exists) {
 			throw InvalidInputException("Existing DuckLake at metadata catalog \"%s\" does not exist - and creating a "
@@ -109,7 +120,7 @@ void DuckLakeInitializer::Initialize() {
 			if (!DuckLakeIsInitialized(transaction)) {
 				error.Throw();
 			}
-			LoadExistingDuckLakeWithRetries(transaction);
+			LoadExistingDuckLakeWithRetries(transaction, nullptr);
 		}
 	}
 	auto &current_metadata_manager = transaction.GetMetadataManager();
@@ -136,7 +147,8 @@ static bool PermanentLoadError(const ErrorData &error) {
 	}
 }
 
-void DuckLakeInitializer::LoadExistingDuckLakeWithRetries(DuckLakeTransaction &transaction) {
+void DuckLakeInitializer::LoadExistingDuckLakeWithRetries(DuckLakeTransaction &transaction,
+                                                          unique_ptr<DuckLakeMetadata> metadata) {
 	// wait for a migration of another attach, whose errors we cannot tell from a real failure
 	static constexpr idx_t MAX_WAIT_MS = 3000;
 	auto retry_config = DuckLakeRetryConfig::FromContext(context);
@@ -144,7 +156,7 @@ void DuckLakeInitializer::LoadExistingDuckLakeWithRetries(DuckLakeTransaction &t
 	idx_t waited_ms = 0;
 	for (idx_t attempt = 0;; attempt++) {
 		try {
-			LoadExistingDuckLake(transaction);
+			LoadExistingDuckLake(transaction, std::move(metadata));
 			return;
 		} catch (std::exception &ex) {
 			ErrorData error(ex);
@@ -178,9 +190,14 @@ void DuckLakeInitializer::AttachMetadata(DuckLakeTransaction &transaction) {
 	if (DatabaseManager::Get(context).GetDatabase(catalog.MetadataDatabaseName())) {
 		metadata_cache_stale = true;
 	}
-	const string attach_query =
-	    "ATTACH OR REPLACE {METADATA_PATH} AS {METADATA_CATALOG_NAME_IDENTIFIER}" + GetAttachOptions();
-	auto result = transaction.GetMetadataManager().AttachMetadata(attach_query);
+	const string attach_query = "ATTACH OR REPLACE {METADATA_PATH} AS {METADATA_CATALOG_NAME_IDENTIFIER}";
+	auto &metadata_manager = transaction.GetMetadataManager();
+	auto result = metadata_manager.AttachMetadata(attach_query + GetAttachOptions(true));
+	if (result->HasError() &&
+	    StringUtil::Contains(StringUtil::Lower(result->GetError()), COMMIT_READS_WITHOUT_WAITING)) {
+		// a postgres extension without the option rejects it before it connects, and attaches as before without it
+		result = metadata_manager.AttachMetadata(attach_query + GetAttachOptions(false));
+	}
 	result->ThrowIfError("Failed to attach DuckLake MetaData \"" + catalog.MetadataDatabaseName() + "\" at path + \"" +
 	                     catalog.MetadataPath() + "\"");
 	// the extension of the metadata database registers its profile when the ATTACH loads it
@@ -257,13 +274,17 @@ void DuckLakeInitializer::InitializeNewDuckLake(DuckLakeTransaction &transaction
 	}
 }
 
-void DuckLakeInitializer::LoadExistingDuckLake(DuckLakeTransaction &transaction) {
+void DuckLakeInitializer::LoadExistingDuckLake(DuckLakeTransaction &transaction,
+                                               unique_ptr<DuckLakeMetadata> metadata) {
 	migrating = false;
 	// load the data path from the existing duck lake
 	auto &metadata_manager = transaction.GetMetadataManager();
-	auto metadata = metadata_manager.LoadDuckLake();
+	if (!metadata) {
+		// a retry runs in a new metadata transaction, which reads the metadata again
+		metadata = make_uniq<DuckLakeMetadata>(metadata_manager.LoadDuckLake());
+	}
 	DuckLakeVersion resolved_version = DuckLakeVersion::UNSET;
-	for (auto &tag : metadata.tags) {
+	for (auto &tag : metadata->tags) {
 		if (tag.key == "version") {
 			auto catalog_version = DuckLakeVersionFromString(tag.value);
 			auto target_version = ResolveTargetVersion(catalog_version, tag.value);
@@ -356,10 +377,10 @@ void DuckLakeInitializer::LoadExistingDuckLake(DuckLakeTransaction &transaction)
 		}
 		options.config_options[tag.key] = tag.value;
 	}
-	for (auto &entry : metadata.schema_settings) {
+	for (auto &entry : metadata->schema_settings) {
 		options.schema_options[entry.schema_id][entry.tag.key] = entry.tag.value;
 	}
-	for (auto &entry : metadata.table_settings) {
+	for (auto &entry : metadata->table_settings) {
 		options.table_options[entry.table_id][entry.tag.key] = entry.tag.value;
 	}
 	// set correct version metadata manager

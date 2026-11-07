@@ -33,10 +33,11 @@ SELECT i, v FROM dl.t ORDER BY i
 statement ok
 DROP TABLE __ducklake_metadata_dl.ducklake_inlined_data_1_1
 
+# the error names the table, whether the scan reads it alone or with its file list
 statement error
 SELECT i, v FROM dl.t ORDER BY i
 ----
-Failed to read inlined data from DuckLake
+ducklake_inlined_data_1_1
 
 statement ok
 SELECT 1

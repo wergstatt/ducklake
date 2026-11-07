@@ -191,4 +191,11 @@ bool QuackMetadataManager::MetadataExists() {
 	return chunk->GetValue(0, 0).GetValue<int64_t>() > 0;
 }
 
+unique_ptr<DuckLakeMetadata> QuackMetadataManager::TryLoadDuckLake() {
+	if (!MetadataExists()) {
+		return nullptr;
+	}
+	return DuckLakeMetadataManager::TryLoadDuckLake();
+}
+
 } // namespace duckdb

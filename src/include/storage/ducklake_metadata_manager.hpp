@@ -223,6 +223,10 @@ public:
 	virtual bool CommitsEachStatement() const {
 		return false;
 	}
+	//! Whether an expiry deletes the snapshots, and what only they referenced, in the batch of its commit
+	virtual bool ExpiresSnapshotsInCommit() const {
+		return false;
+	}
 	//! Whether metadata reads inside a transaction can show commits of other transactions
 	virtual bool ShowsConcurrentCommits() const {
 		return CommitsEachStatement();
@@ -244,6 +248,11 @@ public:
 	//! The error of a failed commit without the text of the failed query that it repeats
 	virtual string CommitErrorWithoutQuery(const string &message) const {
 		return message;
+	}
+	//! Whether the error of a batch that ExecuteAndCommit sent with the COMMIT stopped it before the COMMIT, so that
+	//! the commit surely did not take effect
+	virtual bool FailedBeforeCommit(const string &message) const {
+		return false;
 	}
 	//! Advice added to the error of a commit that failed for good
 	virtual string CommitErrorHint(const string &message) const;
@@ -269,6 +278,9 @@ public:
 			pending_cache_clear = true;
 		}
 	}
+	bool HasPendingCacheClear() const {
+		return pending_cache_clear;
+	}
 	bool TakePendingCacheClear() {
 		bool pending = pending_cache_clear;
 		pending_cache_clear = false;
@@ -291,8 +303,10 @@ public:
 
 	virtual string GetColumnTypeInternal(const LogicalType &column_type);
 	string CastColumnToTarget(const string &column, const LogicalType &type);
-	//! The inlined rows to flush with typed columns, without those this transaction deleted
-	string InlinedFlushSource(const Identifier &inlined_table_name, const DuckLakeTableEntry &table);
+	//! The inlined rows to flush with typed columns, read from the given rows of the inlined table, without those this
+	//! transaction deleted
+	string InlinedFlushSource(const Identifier &inlined_table_name, const DuckLakeTableEntry &table,
+	                          const string &rows);
 	//! The order of the rows in a flushed file
 	string InlinedFlushOrder(const string &sort_order_sql) const;
 
@@ -314,17 +328,33 @@ public:
 	//! Get the version string written to ducklake_metadata
 	virtual string GetVersionString();
 	virtual DuckLakeMetadata LoadDuckLake();
+	//! Load the metadata of the DuckLake in the metadata catalog, nullptr if there is none yet
+	virtual unique_ptr<DuckLakeMetadata> TryLoadDuckLake();
 
 	virtual unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, string &query);
 	virtual unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, const DuckLakeBatch &batch);
+	//! Runs the statements of a batch, followed by the COMMIT of the metadata transaction in the same round trip where
+	//! the catalog can, which sets commit_sent before it goes out. The metadata connection is committed afterwards
+	//! either way, which then sends nothing
+	virtual unique_ptr<QueryResult> ExecuteAndCommit(DuckLakeSnapshot snapshot, const DuckLakeBatch &batch,
+	                                                 bool &commit_sent) {
+		return Execute(snapshot, batch);
+	}
 	virtual unique_ptr<QueryResult> Execute(string &query);
 	//! Runs the statements in a transaction of their own, rolled back when one of them fails
 	virtual unique_ptr<QueryResult> ExecuteInTransaction(string &query);
 	//! Runs statements that drop metadata tables atomically, failing where the drop would wait for their readers
 	virtual unique_ptr<QueryResult> ExecuteDropInTransaction(string &query);
+	//! The rows that the statement at the given position from the end of the batch of the result changed, where the
+	//! result tells
+	virtual optional_idx BatchRowCount(QueryResult &result, idx_t from_end) {
+		return optional_idx();
+	}
 
 	virtual unique_ptr<QueryResult> Query(DuckLakeSnapshot snapshot, string &query);
 	virtual unique_ptr<QueryResult> Query(string &query);
+	//! Runs a read whose text refers to its values as $1, $2, ...
+	virtual unique_ptr<QueryResult> Query(const DuckLakeStatement &query);
 	//! Runs the reads one by one, each with a result of its own
 	virtual vector<unique_ptr<QueryResult>> Query(DuckLakeSnapshot snapshot, const DuckLakeReadBatch &batch);
 
@@ -396,10 +426,15 @@ public:
 	                         const FilterPushdownInfo *filter_info = nullptr);
 	//! Sets the schema version of the partition spec of the files written with an older spec
 	void SetPartitionSchemaVersions(DuckLakeTableEntry &table, vector<DuckLakeCompactionFileEntry> &files);
-	virtual vector<DuckLakeCompactionFileEntry> GetFilesForCompaction(DuckLakeTableEntry &table, CompactionType type,
-	                                                                  double deletion_threshold,
-	                                                                  DuckLakeSnapshot snapshot,
-	                                                                  DuckLakeFileSizeOptions options);
+	//! Adds the reads of the files a compaction of the table considers, for one batch with those of other tables
+	void AddFilesForCompactionReads(DuckLakeReadBatch &reads, DuckLakeTableEntry &table, CompactionType type,
+	                                DuckLakeSnapshot snapshot, DuckLakeFileSizeOptions options,
+	                                const map<idx_t, set<idx_t>> &inlined_deletions);
+	//! The files of the results of the reads that AddFilesForCompactionReads added, from the first of them
+	virtual vector<DuckLakeCompactionFileEntry>
+	GetFilesForCompaction(DuckLakeTableEntry &table, CompactionType type, double deletion_threshold,
+	                      DuckLakeSnapshot snapshot, map<idx_t, set<idx_t>> inlined_deletions,
+	                      vector<unique_ptr<QueryResult>>::iterator results);
 	virtual idx_t GetBeginSnapshotForTable(TableIndex table_id);
 	virtual idx_t GetBeginSnapshotForSchemaVersion(TableIndex table_id, idx_t schema_version);
 	DuckLakeTableSchemaVersions GetTableSchemaVersions(TableIndex table_id, DuckLakeSnapshot snapshot);
@@ -431,11 +466,13 @@ public:
 	//! The inserts of the given rows, which refer to their values as $1, $2, ..., in the batches of InsertValuesSql
 	static DuckLakeBatch InsertValuesBatch(const string &table_name, const vector<DuckLakeStatement> &values);
 	identifier_set_t GetInlinedTableNames(TableIndex table_id);
-	virtual vector<DuckLakeFileForCleanup> GetOldFilesForCleanup(const string &filter);
+	virtual vector<DuckLakeFileForCleanup> GetOldFilesForCleanup(const DuckLakeStatement &filter);
 	virtual vector<DuckLakeFileForCleanup> GetOrphanFilesForCleanup(const string &filter);
-	virtual vector<DuckLakeFileForCleanup> GetFilesForCleanup(const string &filter, CleanupType type);
+	virtual vector<DuckLakeFileForCleanup> GetFilesForCleanup(const DuckLakeStatement &filter, CleanupType type);
 
 	virtual void RemoveFilesScheduledForCleanup(const vector<DuckLakeFileForCleanup> &cleaned_up_files);
+	//! The deletes of the cleaned-up files from the schedule, for the batch that commits the cleanup
+	static DuckLakeBatch RemoveFilesScheduledForCleanupSql(const vector<DuckLakeFileForCleanup> &cleaned_up_files);
 	static string DropSchemas(const set<SchemaIndex> &ids);
 	static string DropTables(const set<TableIndex> &ids, bool renamed);
 	static string DropViews(const set<TableIndex> &ids, bool renamed, bool drop_view_column_tags = false);
@@ -489,7 +526,7 @@ public:
 	bool TryAppendDataFiles(DuckLakeSnapshot &commit_snapshot, const vector<DuckLakeFileInfo> &new_files,
 	                        const vector<DuckLakeTableInfo> &new_tables,
 	                        vector<DuckLakeSchemaInfo> &new_schemas_result);
-	virtual DuckLakeBatch WriteNewInlinedData(DuckLakeSnapshot &commit_snapshot,
+	virtual DuckLakeBatch WriteNewInlinedData(DuckLakeSnapshot &commit_snapshot, DuckLakeSnapshot transaction_snapshot,
 	                                          const vector<DuckLakeInlinedDataInfo> &new_data,
 	                                          const vector<DuckLakeTableInfo> &new_tables,
 	                                          const vector<DuckLakeTableInfo> &new_inlined_data_tables_result,
@@ -614,6 +651,13 @@ public:
 	                                                           const DuckLakeTableEntry &table,
 	                                                           const string &sort_order_sql,
 	                                                           const vector<string> &columns_to_read);
+	//! Reads the inlined data of a flush from the given rows of the inlined table
+	unique_ptr<QueryResult> ReadInlinedRowsForFlush(DuckLakeSnapshot snapshot, const Identifier &inlined_table_name,
+	                                                const DuckLakeTableEntry &table, const string &sort_order_sql,
+	                                                const vector<string> &columns_to_read, const string &rows);
+	//! Reads the rows of the inlined tables that a flush writes ahead, where the backend can read them all at once
+	virtual void ReadInlinedTablesForFlush(DuckLakeSnapshot snapshot, const vector<Identifier> &inlined_table_names) {
+	}
 	//! SQL builders for the stats-refresh queries used by DuckLakeTransactionState::RecomputeGlobalStatsAfterRewrite.
 	//! Caller substitutes `{METADATA_CATALOG}` / `{SNAPSHOT_ID}` and executes via the commit context's executor.
 	static string ReadInlinedDataAggregatesSql(const Identifier &inlined_table_name, const string &select_list,
@@ -634,8 +678,13 @@ public:
 	virtual vector<DuckLakeSnapshotInfo> GetAllSnapshots(const string &filter = string());
 	//! The snapshots in the column order of ducklake_snapshots, then next_file_id
 	unique_ptr<QueryResult> ReadSnapshots(const string &filter);
+	vector<DuckLakeSnapshotInfo> ParseSnapshots(QueryResult &result);
 	//! The live snapshot tags, with the times of their snapshots if requested
 	virtual vector<DuckLakeSnapshotTagInfo> GetSnapshotTags(bool with_snapshot_time = true);
+	vector<DuckLakeSnapshotTagInfo> ParseSnapshotTags(QueryResult &result);
+	//! The live snapshot tags without their times, the snapshots of each filter and, if requested, the inlined data
+	//! tables, in one read batch
+	DuckLakeExpiryReads ReadExpiry(const vector<DuckLakeStatement> &filters, bool inlined_tables);
 	//! The snapshot of the live snapshot tag with the name, if any
 	optional_idx GetTaggedSnapshot(const string &name);
 	//! The snapshot id of a VERSION value, a snapshot id or the name of a snapshot tag
@@ -644,11 +693,22 @@ public:
 	                                      const case_insensitive_map_t<DuckLakeSnapshotTagInfo> &dropped);
 	//! Ends the row of a committed tag at the snapshot of the commit
 	static string EndSnapshotTagSql(const DuckLakeSnapshotTagInfo &tag);
-	static string DeleteSnapshotsSql(const vector<DuckLakeSnapshotInfo> &snapshots);
+	static DuckLakeBatch DeleteSnapshotsSql(const vector<DuckLakeSnapshotInfo> &snapshots);
 	//! Deletes the snapshots once the caller checked the catalog version
 	virtual void DeleteSnapshots(const vector<DuckLakeSnapshotInfo> &snapshots);
 	//! Deletes the metadata that only the deleted snapshots referenced, once the caller checked the catalog version
 	virtual void CleanupExpiredSnapshots(const vector<DuckLakeSnapshotInfo> &snapshots);
+	//! The statements that delete what no remaining snapshot references, after the snapshots were deleted, and
+	//! schedule its files for deletion; the inlined tables are those whose expired rows they delete. With
+	//! expired_tables_from_end, sets the position of the statement that deletes tables, counted from the end
+	DuckLakeBatch ExpiredSnapshotsCleanupSql(const vector<Identifier> &inlined_tables,
+	                                         optional_ptr<idx_t> expired_tables_from_end = nullptr);
+	//! Drops the inlined tables of the given tables, and their registrations
+	static DuckLakeBatch DropInlinedTablesSql(const set<TableIndex> &tables, const vector<Identifier> &inlined_tables);
+	//! Drops the registered inlined tables of tables that no longer exist, after the commit of an expiry that deleted
+	//! tables in its batch
+	virtual void DropInlinedTablesOfDeletedTables() {
+	}
 	virtual vector<DuckLakeTableSizeInfo> GetTableSizes(DuckLakeSnapshot snapshot);
 	//! The tables with data files that are not dropped
 	unordered_set<idx_t> GetTablesWithLiveDataFiles();
@@ -656,6 +716,16 @@ public:
 	virtual idx_t SetConfigOption(const DuckLakeConfigOption &option);
 	virtual bool ResetConfigOption(const DuckLakeConfigOption &option);
 	idx_t ConfigOptionRowCount(const DuckLakeConfigOption &option, optional_ptr<const string> value = nullptr);
+	//! The read of the rows of the option, of those with the value if given
+	static DuckLakeStatement ConfigOptionRowCountSql(const DuckLakeConfigOption &option,
+	                                                 optional_ptr<const string> value = nullptr);
+	//! The count of a read of ConfigOptionRowCountSql
+	static idx_t ConfigOptionRowCount(QueryResult &result);
+	//! Runs the writes, then the reads, and sets the results of the reads unless the writes fail; where the catalog
+	//! can, in one round trip
+	virtual unique_ptr<QueryResult> ExecuteAndQuery(DuckLakeSnapshot snapshot, const string &writes,
+	                                                const DuckLakeReadBatch &reads,
+	                                                vector<unique_ptr<QueryResult>> &results);
 	virtual void MigrateV01();
 	virtual void MigrateV02(bool allow_failures = false);
 	virtual void MigrateV03(bool allow_failures = false);
@@ -704,6 +774,19 @@ protected:
 	                                     vector<idx_t> &runtime_filter_stats_columns,
 	                                     FileListType file_list_type = FileListType::SCAN,
 	                                     const string &metadata_table_prefix = "{METADATA_CATALOG}");
+	//! The Top-N dynamic filters of a scan, which order the files by their statistics and check them per file
+	static void GetDynamicFilters(const FilterPushdownInfo *filter_info,
+	                              vector<DuckLakeFileListDynamicFilter> &dynamic_filter_columns,
+	                              vector<idx_t> &runtime_filter_stats_columns);
+	//! The files of the result of a file list query, with their inlined file deletions
+	vector<DuckLakeFileListEntry> ReadFileList(DuckLakeTableEntry &table, DuckLakeSnapshot snapshot,
+	                                           QueryResult &result, const vector<idx_t> &runtime_filter_stats_columns,
+	                                           map<idx_t, set<idx_t>> &inlined_deletions);
+	static string InlinedFileDeletionsQuery(const Identifier &inlined_table_name);
+	static map<idx_t, set<idx_t>> ReadInlinedFileDeletions(QueryResult &query_result);
+	static string GetProjection(const vector<string> &columns_to_read);
+	//! The rows of an inlined table that the snapshot sees, in the order of their row ids
+	string InlinedDataQuery(const string &projection, const Identifier &inlined_table_name);
 
 	//! Wrap field selections with list aggregation of struct objects (DBMS-specific)
 	//! For DuckDB: LIST({'key1': val1, 'key2': val2, ...})
@@ -754,7 +837,6 @@ protected:
 	DuckLakePath GetRelativePath(const string &path, const string &data_path);
 	string FromRelativePath(const DuckLakePath &path, const string &base_path);
 	string FromRelativePath(const DuckLakePath &path);
-	string FromRelativePath(TableIndex table_id, const DuckLakePath &path);
 	string GetPath(TableIndex table_id, const vector<DuckLakeTableInfo> &new_tables,
 	               const vector<DuckLakeSchemaInfo> &new_schemas_result);
 	FileSystem &GetFileSystem();
