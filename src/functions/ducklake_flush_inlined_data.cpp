@@ -224,10 +224,10 @@ class DuckLakeLogicalFlush : public LogicalExtensionOperator {
 public:
 	DuckLakeLogicalFlush(TableIndex table_index, DuckLakeTableEntry &table, DuckLakeInlinedTableInfo inlined_table_p,
 	                     shared_ptr<DuckLakeCommittedInlinedRows> inlined_rows_p, string encryption_key_p,
-	                     optional_idx partition_id_p)
+	                     optional_idx partition_id_p, bool release_metadata_transaction)
 	    : table_index(table_index), table(table), inlined_table(std::move(inlined_table_p)),
 	      inlined_rows(std::move(inlined_rows_p)), encryption_key(std::move(encryption_key_p)),
-	      partition_id(partition_id_p) {
+	      partition_id(partition_id_p), release_metadata_transaction(release_metadata_transaction) {
 	}
 
 	TableIndex table_index;
@@ -236,10 +236,15 @@ public:
 	shared_ptr<DuckLakeCommittedInlinedRows> inlined_rows;
 	string encryption_key;
 	optional_idx partition_id;
+	bool release_metadata_transaction;
 
 public:
 	PhysicalOperator &CreatePlan(ClientContext &context, PhysicalPlanGenerator &planner) override {
 		auto &child = planner.CreatePlan(*children[0]);
+		if (release_metadata_transaction) {
+			// the optimizer reads table stats after the bind released the metadata transaction
+			DuckLakeTransaction::Get(context, table.catalog).ReleaseMetadataTransaction();
+		}
 		return planner.Make<DuckLakeFlushData>(types, table, std::move(inlined_table), std::move(inlined_rows),
 		                                       std::move(encryption_key), partition_id, child);
 	}
@@ -266,7 +271,8 @@ public:
 class DuckLakeDataFlusher {
 public:
 	DuckLakeDataFlusher(ClientContext &context, DuckLakeCatalog &catalog, DuckLakeTransaction &transaction,
-	                    Binder &binder, TableIndex table_id, const DuckLakeInlinedTableInfo &inlined_table);
+	                    Binder &binder, TableIndex table_id, const DuckLakeInlinedTableInfo &inlined_table,
+	                    bool release_metadata_transaction);
 
 	unique_ptr<LogicalOperator> GenerateFlushCommand();
 
@@ -279,13 +285,15 @@ private:
 	Binder &binder;
 	TableIndex table_id;
 	const DuckLakeInlinedTableInfo &inlined_table;
+	bool release_metadata_transaction;
 };
 
 DuckLakeDataFlusher::DuckLakeDataFlusher(ClientContext &context, DuckLakeCatalog &catalog,
                                          DuckLakeTransaction &transaction, Binder &binder, TableIndex table_id,
-                                         const DuckLakeInlinedTableInfo &inlined_table_p)
+                                         const DuckLakeInlinedTableInfo &inlined_table_p,
+                                         bool release_metadata_transaction)
     : context(context), catalog(catalog), transaction(transaction), binder(binder), table_id(table_id),
-      inlined_table(inlined_table_p) {
+      inlined_table(inlined_table_p), release_metadata_transaction(release_metadata_transaction) {
 }
 
 string DuckLakeDataFlusher::GetFlushSortOrderSQL(const DuckLakeTableEntry &table) {
@@ -340,9 +348,9 @@ unique_ptr<LogicalOperator> DuckLakeDataFlusher::GenerateFlushCommand() {
 	copy->children.push_back(std::move(root));
 
 	// followed by the compaction operator (that writes the results back to the
-	auto compaction =
-	    make_uniq<DuckLakeLogicalFlush>(binder.GenerateTableIndex(), table, inlined_table, std::move(inlined_rows),
-	                                    std::move(copy_input.encryption_key), partition_id);
+	auto compaction = make_uniq<DuckLakeLogicalFlush>(binder.GenerateTableIndex(), table, inlined_table,
+	                                                  std::move(inlined_rows), std::move(copy_input.encryption_key),
+	                                                  partition_id, release_metadata_transaction);
 	compaction->children.push_back(std::move(copy));
 	return std::move(compaction);
 }
@@ -365,8 +373,8 @@ struct FileDeleteInfo {
 	DeleteFileFormat existing_delete_format = DeleteFileFormat::PARQUET;
 };
 
-static void FlushInlinedFileDeletions(ClientContext &context, DuckLakeCatalog &catalog,
-                                      DuckLakeTransaction &transaction, DuckLakeTableEntry &table) {
+static unordered_map<idx_t, FileDeleteInfo>
+ReadInlinedFileDeletions(DuckLakeCatalog &catalog, DuckLakeTransaction &transaction, DuckLakeTableEntry &table) {
 	auto &metadata_manager = transaction.GetMetadataManager();
 	auto table_id = table.GetTableId();
 	auto snapshot = transaction.GetSnapshot();
@@ -375,7 +383,7 @@ static void FlushInlinedFileDeletions(ClientContext &context, DuckLakeCatalog &c
 	auto inlined_table_name = metadata_manager.GetInlinedDeletionTableName(table_id, snapshot);
 	if (inlined_table_name.empty()) {
 		// No inlined deletions for this table, skiddadle
-		return;
+		return {};
 	}
 
 	// Query the inlined deletions with the delete file active when their data file was last visible
@@ -433,9 +441,17 @@ WHERE del.begin_snapshot <= {SNAPSHOT_ID}
 		file_info.deletions.insert(pos_with_snap);
 	}
 
+	return files_to_flush;
+}
+
+static void FlushInlinedFileDeletions(ClientContext &context, DuckLakeCatalog &catalog,
+                                      DuckLakeTransaction &transaction, DuckLakeTableEntry &table,
+                                      unordered_map<idx_t, FileDeleteInfo> &files_to_flush) {
 	if (files_to_flush.empty()) {
 		return;
 	}
+	auto table_id = table.GetTableId();
+	auto snapshot = transaction.GetSnapshot();
 
 	// Write delete files
 	auto &fs = FileSystem::GetFileSystem(context);
@@ -521,10 +537,13 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, 
 	auto &ducklake_catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input);
 	ducklake_catalog.VerifyWritable();
 	auto &transaction = DuckLakeTransaction::Get(context, ducklake_catalog);
+	// as a compaction, a flush of its own reads first and holds no metadata transaction while it writes files
+	bool release_metadata_transaction = context.transaction.IsAutoCommit() && !transaction.ChangesMade();
 
 	auto schema = DuckLakeTableFunctionUtil::GetStringOption(input, "schema_name");
 	auto table = DuckLakeTableFunctionUtil::GetStringOption(input, "table_name");
 	vector<unique_ptr<LogicalOperator>> flushes;
+	vector<pair<reference<DuckLakeTableEntry>, unordered_map<idx_t, FileDeleteInfo>>> file_deletions;
 	for (auto &table_ref : DuckLakeBaseMetadataFunction::GetTablesInScope(context, ducklake_catalog, schema, table)) {
 		auto &table_entry = table_ref.get();
 		if (!ducklake_catalog.AutoCompactEnabled(table_entry)) {
@@ -532,10 +551,16 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, 
 		}
 		for (auto &inlined_table : table_entry.GetInlinedDataTables(transaction, transaction.GetSnapshot())) {
 			DuckLakeDataFlusher flusher(context, ducklake_catalog, transaction, *input.binder, table_entry.GetTableId(),
-			                            inlined_table);
+			                            inlined_table, release_metadata_transaction);
 			flushes.push_back(flusher.GenerateFlushCommand());
 		}
-		FlushInlinedFileDeletions(context, ducklake_catalog, transaction, table_entry);
+		file_deletions.emplace_back(table_entry, ReadInlinedFileDeletions(ducklake_catalog, transaction, table_entry));
+	}
+	if (release_metadata_transaction) {
+		transaction.ReleaseMetadataTransaction();
+	}
+	for (auto &entry : file_deletions) {
+		FlushInlinedFileDeletions(context, ducklake_catalog, transaction, entry.first, entry.second);
 	}
 	return_names.push_back("schema_name");
 	return_names.push_back("table_name");
