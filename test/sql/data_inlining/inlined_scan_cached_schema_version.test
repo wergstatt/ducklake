@@ -1,0 +1,54 @@
+# name: test/sql/data_inlining/inlined_scan_cached_schema_version.test
+# description: A scan of an inlined table of an older schema version takes the cached schema without its begin snapshot
+# group: [data_inlining]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/inlined_scan_cached_schema_version')
+
+statement ok
+CREATE TABLE ducklake.t (a INTEGER)
+
+statement ok
+INSERT INTO ducklake.t VALUES (1)
+
+statement ok
+ALTER TABLE ducklake.t ADD COLUMN b INTEGER
+
+# a transaction with changes caches no begin snapshots of schema versions
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO ducklake.t VALUES (2, 2)
+
+statement ok
+FROM ducklake.t
+
+statement ok
+CALL enable_logging('DuckLakeMetadata')
+
+query II
+FROM ducklake.t ORDER BY a
+----
+1	NULL
+2	2
+
+statement ok
+CALL disable_logging()
+
+statement ok
+COMMIT
+
+query II
+SELECT count(*) > 0, count(*) FILTER (WHERE query LIKE '%SELECT begin_snapshot%')
+FROM duckdb_logs_parsed('DuckLakeMetadata')
+----
+true	0
