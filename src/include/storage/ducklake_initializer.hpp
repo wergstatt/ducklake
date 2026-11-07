@@ -32,7 +32,7 @@ private:
 	void RestartMetadataTransaction(DuckLakeTransaction &transaction);
 	bool DuckLakeIsInitialized(DuckLakeTransaction &transaction);
 	void InitializeDataPath();
-	string GetAttachOptions();
+	string GetAttachOptions(bool commit_reads_without_waiting);
 	void SetVersionedMetadataManager(DuckLakeTransaction &transaction, DuckLakeVersion version);
 	DuckLakeVersion ResolveTargetVersion(DuckLakeVersion catalog_version, const string &catalog_version_str);
 

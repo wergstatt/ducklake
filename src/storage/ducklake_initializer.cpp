@@ -30,7 +30,10 @@ DuckLakeInitializer::DuckLakeInitializer(ClientContext &context, DuckLakeCatalog
 	InitializeDataPath();
 }
 
-string DuckLakeInitializer::GetAttachOptions() {
+//! The Postgres attach option that sends the COMMIT of a transaction that only read without waiting for its reply
+static constexpr const char *COMMIT_READS_WITHOUT_WAITING = "commit_reads_without_waiting";
+
+string DuckLakeInitializer::GetAttachOptions(bool commit_reads_without_waiting) {
 	vector<string> attach_options;
 	const string metadata_type = catalog.MetadataType();
 	// Quack does not enforce read-only attaches and newer versions reject them, the DuckLake catalog refuses writes
@@ -58,6 +61,13 @@ string DuckLakeInitializer::GetAttachOptions() {
 	bool user_set_schema = options.metadata_parameters.find("schema") != options.metadata_parameters.end();
 	if (is_postgres && !user_set_schema && !options.metadata_schema.empty()) {
 		attach_options.push_back("SCHEMA " + SQLString::ToString(options.metadata_schema.GetIdentifierName()));
+	}
+	// a transaction that only read has its results whatever its COMMIT replies, so it need not wait for the reply
+	// an explicit META_COMMIT_READS_WITHOUT_WAITING takes precedence over this
+	bool user_set_commit =
+	    options.metadata_parameters.find(COMMIT_READS_WITHOUT_WAITING) != options.metadata_parameters.end();
+	if (is_postgres && commit_reads_without_waiting && !user_set_commit) {
+		attach_options.push_back(string(COMMIT_READS_WITHOUT_WAITING) + " true");
 	}
 	if (options.hide_metadata_catalog) {
 		attach_options.push_back("HIDDEN true");
@@ -178,9 +188,14 @@ void DuckLakeInitializer::AttachMetadata(DuckLakeTransaction &transaction) {
 	if (DatabaseManager::Get(context).GetDatabase(catalog.MetadataDatabaseName())) {
 		metadata_cache_stale = true;
 	}
-	const string attach_query =
-	    "ATTACH OR REPLACE {METADATA_PATH} AS {METADATA_CATALOG_NAME_IDENTIFIER}" + GetAttachOptions();
-	auto result = transaction.GetMetadataManager().AttachMetadata(attach_query);
+	const string attach_query = "ATTACH OR REPLACE {METADATA_PATH} AS {METADATA_CATALOG_NAME_IDENTIFIER}";
+	auto &metadata_manager = transaction.GetMetadataManager();
+	auto result = metadata_manager.AttachMetadata(attach_query + GetAttachOptions(true));
+	if (result->HasError() &&
+	    StringUtil::Contains(StringUtil::Lower(result->GetError()), COMMIT_READS_WITHOUT_WAITING)) {
+		// a postgres extension without the option rejects it before it connects, and attaches as before without it
+		result = metadata_manager.AttachMetadata(attach_query + GetAttachOptions(false));
+	}
 	result->ThrowIfError("Failed to attach DuckLake MetaData \"" + catalog.MetadataDatabaseName() + "\" at path + \"" +
 	                     catalog.MetadataPath() + "\"");
 	// the extension of the metadata database registers its profile when the ATTACH loads it
