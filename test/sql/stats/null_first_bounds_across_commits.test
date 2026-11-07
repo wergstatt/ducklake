@@ -315,6 +315,13 @@ INSERT INTO ducklake.{tbl} VALUES (5, NULL), (NULL, NULL);
 statement ok
 UPDATE __ducklake_metadata_ducklake.ducklake_table_column_stats SET min_value = NULL, max_value = NULL WHERE table_id IN (SELECT table_id FROM __ducklake_metadata_ducklake.ducklake_table WHERE table_name = '{tbl}')
 
+# a new attach reads the edited stats instead of those that the insert kept
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/null_first_bounds_across_commits', DATA_INLINING_ROW_LIMIT 0)
+
 statement ok
 INSERT INTO ducklake.{tbl} VALUES (1, 2);
 
@@ -384,6 +391,13 @@ INSERT INTO ducklake.updated VALUES (100), (NULL);
 
 statement ok
 UPDATE __ducklake_metadata_ducklake.ducklake_table_column_stats SET min_value = NULL, max_value = NULL WHERE table_id = (SELECT table_id FROM __ducklake_metadata_ducklake.ducklake_table WHERE table_name = 'updated')
+
+# a new attach reads the edited stats instead of those that the insert kept
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/null_first_bounds_across_commits', DATA_INLINING_ROW_LIMIT 0)
 
 statement ok
 INSERT INTO ducklake.updated VALUES (5);

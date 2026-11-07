@@ -6,7 +6,7 @@ require ducklake
 
 require parquet
 
-test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/commit_internal_error.db
 
 test-env DATA_PATH {TEST_DIR}
 
@@ -22,6 +22,13 @@ INSERT INTO ducklake.t VALUES (1), (2)
 # stored stats below the rows of the file make dropping the file fail with an internal error
 statement ok
 UPDATE __ducklake_metadata_ducklake.ducklake_table_stats SET record_count = 0
+
+# a new attach reads the edited stats instead of those that the insert kept
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/commit_internal_error', DATA_INLINING_ROW_LIMIT 0)
 
 # let the INTERNAL error of the commit through the runner
 set always_fail_error_messages

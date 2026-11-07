@@ -483,3 +483,22 @@ getvariable('postgres_replaced_2') = getvariable('postgres_replaced_12'),
 (SELECT count(*) FROM ducklake_list_files('ducklake', 'replaced_11'))
 ----
 true	true	true	1
+
+# an insert takes the stats of its table from the commit before it
+statement ok
+INSERT INTO ducklake.few VALUES (2, 'first')
+
+statement ok
+CALL enable_logging('DuckLakeMetadata')
+
+statement ok
+INSERT INTO ducklake.few VALUES (3, 'second')
+
+statement ok
+CALL disable_logging()
+
+query II
+SELECT count(*) > 0, count(*) FILTER (WHERE regexp_matches(query, 'SELECT\s+table_id,\s*column_id,\s*record_count'))
+FROM duckdb_logs_parsed('DuckLakeMetadata')
+----
+true	0
