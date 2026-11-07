@@ -628,6 +628,9 @@ public:
 	virtual void DeleteSnapshots(const vector<DuckLakeSnapshotInfo> &snapshots);
 	//! Deletes the metadata that only the deleted snapshots referenced, once the caller checked the catalog version
 	virtual void CleanupExpiredSnapshots(const vector<DuckLakeSnapshotInfo> &snapshots);
+	//! The statements that delete what no remaining snapshot references, after the snapshots were deleted, and
+	//! schedule its files for deletion; the inlined tables are those of the tables that remain
+	vector<string> ExpiredSnapshotsCleanupSql(const vector<Identifier> &inlined_tables);
 	virtual vector<DuckLakeTableSizeInfo> GetTableSizes(DuckLakeSnapshot snapshot);
 	//! The tables with data files that are not dropped
 	unordered_set<idx_t> GetTablesWithLiveDataFiles();
@@ -729,7 +732,6 @@ protected:
 	DuckLakePath GetRelativePath(const string &path, const string &data_path);
 	string FromRelativePath(const DuckLakePath &path, const string &base_path);
 	string FromRelativePath(const DuckLakePath &path);
-	string FromRelativePath(TableIndex table_id, const DuckLakePath &path);
 	string GetPath(TableIndex table_id, const vector<DuckLakeTableInfo> &new_tables,
 	               const vector<DuckLakeSchemaInfo> &new_schemas_result);
 	FileSystem &GetFileSystem();
