@@ -1,0 +1,178 @@
+# name: test/sql/data_inlining/inlined_table_from_catalog.test
+# description: An inlined insert takes its inlined data table from the catalog instead of reading it at commit
+# group: [data_inlining]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/inlined_table_from_catalog', DATA_INLINING_ROW_LIMIT 10)
+
+statement ok
+CREATE TABLE ducklake.t (i INTEGER)
+
+statement ok
+INSERT INTO ducklake.t VALUES (1)
+
+statement ok
+CALL enable_logging('DuckLakeMetadata')
+
+statement ok
+INSERT INTO ducklake.t VALUES (2)
+
+statement ok
+CALL disable_logging()
+
+query II
+SELECT count(*) > 0, count(*) FILTER (WHERE query LIKE '%ducklake_inlined_data_tables%')
+FROM duckdb_logs_parsed('DuckLakeMetadata')
+----
+true	0
+
+# an insert after an alter takes the inlined table of the new schema version
+statement ok
+CREATE TABLE ducklake.altered (i INTEGER)
+
+statement ok
+INSERT INTO ducklake.altered VALUES (1)
+
+statement ok
+ALTER TABLE ducklake.altered ADD COLUMN j INTEGER
+
+# the insert creates the inlined table of the new schema version
+statement ok
+INSERT INTO ducklake.altered VALUES (2, 20)
+
+statement ok
+CALL truncate_duckdb_logs()
+
+statement ok
+CALL enable_logging('DuckLakeMetadata')
+
+statement ok
+INSERT INTO ducklake.altered VALUES (3, 30)
+
+statement ok
+CALL disable_logging()
+
+query II
+SELECT count(*) > 0, count(*) FILTER (WHERE query LIKE '%ducklake_inlined_data_tables%schema_version = (%')
+FROM duckdb_logs_parsed('DuckLakeMetadata')
+----
+true	0
+
+query II
+SELECT i, j FROM ducklake.altered ORDER BY i
+----
+1	NULL
+2	20
+3	30
+
+# an insert after a flush in the same transaction takes the flushed inlined table
+statement ok
+CREATE TABLE ducklake.flushed (i INTEGER)
+
+statement ok
+INSERT INTO ducklake.flushed VALUES (1)
+
+statement ok
+BEGIN
+
+statement ok
+CALL ducklake_flush_inlined_data('ducklake', table_name => 'flushed')
+
+statement ok
+INSERT INTO ducklake.flushed VALUES (2)
+
+statement ok
+CALL truncate_duckdb_logs()
+
+statement ok
+CALL enable_logging('DuckLakeMetadata')
+
+statement ok
+COMMIT
+
+statement ok
+CALL disable_logging()
+
+query II
+SELECT count(*) > 0, count(*) FILTER (WHERE query LIKE '%ducklake_inlined_data_tables%schema_version = (%')
+FROM duckdb_logs_parsed('DuckLakeMetadata')
+----
+true	0
+
+query I
+SELECT i FROM ducklake.flushed ORDER BY i
+----
+1
+2
+
+statement ok
+SET immediate_transaction_mode=true
+
+# a commit that retries after a commit of another table reads the inlined table
+statement ok
+CREATE TABLE ducklake.concurrent (i INTEGER)
+
+statement ok
+INSERT INTO ducklake.concurrent VALUES (1)
+
+statement ok con1
+BEGIN
+
+statement ok con1
+INSERT INTO ducklake.concurrent VALUES (2)
+
+statement ok con2
+CREATE TABLE ducklake.other (i INTEGER)
+
+statement ok
+CALL truncate_duckdb_logs()
+
+statement ok
+CALL enable_logging('DuckLakeMetadata')
+
+statement ok con1
+COMMIT
+
+statement ok
+CALL disable_logging()
+
+query I
+SELECT count(*) FILTER (WHERE query LIKE '%ducklake_inlined_data_tables%schema_version = (%') > 0
+FROM duckdb_logs_parsed('DuckLakeMetadata')
+----
+true
+
+query I
+SELECT i FROM ducklake.concurrent ORDER BY i
+----
+1
+2
+
+# a commit after an alter of the table conflicts
+statement ok con1
+BEGIN
+
+statement ok con1
+INSERT INTO ducklake.concurrent VALUES (3)
+
+statement ok con2
+ALTER TABLE ducklake.concurrent ADD COLUMN j INTEGER
+
+statement error con1
+COMMIT
+----
+another transaction has altered it
+
+query II
+SELECT i, j FROM ducklake.concurrent ORDER BY i
+----
+1	NULL
+2	NULL

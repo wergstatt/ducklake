@@ -110,6 +110,8 @@ public:
 	//! Whether an inlined data table of the schema version has the columns of the last schema change
 	static bool IsCurrentInlinedDataTable(idx_t schema_version, optional_idx last_schema_change);
 	bool HasCurrentInlinedDataTable(optional_idx last_schema_change) const;
+	//! The inlined data table that new rows go to, empty if the latest one lacks the columns of the last schema change
+	Identifier CurrentInlinedDataTable(optional_idx last_schema_change) const;
 	//! The inlined data tables at the snapshot, without the flushed ones when local changes are included
 	vector<DuckLakeInlinedTableInfo> GetInlinedDataTables(DuckLakeTransaction &transaction, DuckLakeSnapshot snapshot,
 	                                                      bool include_local_changes = true) const;

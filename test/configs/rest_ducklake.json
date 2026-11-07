@@ -35,6 +35,7 @@
         "test/sql/compaction/merge_adjacent_empty_tables.test",
         "test/sql/compaction/merge_adjacent_inlined_deletion_lookup.test",
         "test/sql/data_inlining/inlined_commit_append.test",
+        "test/sql/data_inlining/inlined_table_from_catalog.test",
         "test/sql/delete/extended_file_list_metadata_query.test",
         "test/sql/issues/issue_1146_column_insert_batches.test",
         "test/sql/issues/issue_1398_bulk_table_stats.test",

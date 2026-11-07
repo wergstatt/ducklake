@@ -1796,8 +1796,8 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 	context.write_inlined_data = [&](DuckLakeSnapshot &snapshot, const vector<DuckLakeInlinedDataInfo> &new_data,
 	                                 const vector<DuckLakeTableInfo> &new_tables,
 	                                 const vector<DuckLakeTableInfo> &new_inlined_data_tables_result) {
-		return metadata_manager->WriteNewInlinedData(snapshot, new_data, new_tables, new_inlined_data_tables_result,
-		                                             inlined_inserts);
+		return metadata_manager->WriteNewInlinedData(snapshot, transaction_snapshot, new_data, new_tables,
+		                                             new_inlined_data_tables_result, inlined_inserts);
 	};
 	// a commit reads the stats of the tables it changes in one query, not of the whole lake
 	auto commit_tables = transaction_changes.GetChangedTables();

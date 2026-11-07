@@ -154,6 +154,17 @@ bool DuckLakeTableEntry::HasCurrentInlinedDataTable(optional_idx last_schema_cha
 	return false;
 }
 
+Identifier DuckLakeTableEntry::CurrentInlinedDataTable(optional_idx last_schema_change) const {
+	auto latest = std::max_element(inlined_data_tables.begin(), inlined_data_tables.end(),
+	                               [](const DuckLakeInlinedTableInfo &a, const DuckLakeInlinedTableInfo &b) {
+		                               return a.schema_version < b.schema_version;
+	                               });
+	if (latest == inlined_data_tables.end() || !IsCurrentInlinedDataTable(latest->schema_version, last_schema_change)) {
+		return Identifier();
+	}
+	return latest->table_name;
+}
+
 // ALTER TABLE RENAME/SET COMMENT/ADD COLUMN/DROP COLUMN
 DuckLakeTableEntry::DuckLakeTableEntry(DuckLakeTableEntry &parent, CreateTableInfo &info, LocalChange local_change)
     : DuckLakeTableEntry(parent.ParentCatalog(), parent.ParentSchema(), info, parent.GetTableId(),
