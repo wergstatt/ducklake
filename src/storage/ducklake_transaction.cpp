@@ -1698,12 +1698,21 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 		}
 		inlined_inserts.clear();
 		if ((!result || !result->HasError()) && !config_option_lock.empty()) {
-			// the lock is taken last, so that it is only held until the commit
-			auto lock = config_option_lock;
-			result = metadata_manager->Execute(snapshot, lock);
+			// the lock is taken last, so that it is only held until the commit, and the rows of the options are
+			// counted after it
+			DuckLakeReadBatch counts;
+			for (auto change : LastConfigOptionChanges()) {
+				auto &option = config_option_undo[change].option;
+				counts.Add(DuckLakeMetadataManager::ConfigOptionRowCountSql(option));
+				if (!config_option_undo[change].reset) {
+					counts.Add(DuckLakeMetadataManager::ConfigOptionRowCountSql(option, &option.option.value));
+				}
+			}
+			vector<unique_ptr<QueryResult>> count_results;
+			result = metadata_manager->ExecuteAndQuery(snapshot, config_option_lock, counts, count_results);
 			// the update of the version row fails after another commit updated it, or under READ COMMITTED waits
 			// for that commit and then sees its options
-			option_lock_failed = result->HasError() || ConfigOptionsWrittenByOthers();
+			option_lock_failed = result->HasError() || ConfigOptionsWrittenByOthers(count_results);
 			if (option_lock_failed && !result->HasError()) {
 				throw TransactionException("Another transaction wrote options that this transaction changed");
 			}
@@ -1957,24 +1966,31 @@ idx_t DuckLakeTransaction::ConfigOptionRows(idx_t change_index, idx_t written_ro
 	return MaxValue<idx_t>(config_option_undo[earlier.GetIndex()].metadata_rows, 1);
 }
 
-bool DuckLakeTransaction::ConfigOptionsWrittenByOthers() {
+vector<idx_t> DuckLakeTransaction::LastConfigOptionChanges() const {
+	vector<idx_t> result;
 	for (idx_t i = 0; i < config_option_undo.size(); i++) {
-		auto &change = config_option_undo[i];
-		// the last change of an option decides the rows it has
 		bool changed_again = false;
 		for (idx_t later = i + 1; later < config_option_undo.size(); later++) {
-			changed_again = changed_again || IsSameConfigOption(config_option_undo[later].option, change.option);
+			changed_again =
+			    changed_again || IsSameConfigOption(config_option_undo[later].option, config_option_undo[i].option);
 		}
-		if (changed_again) {
-			continue;
+		if (!changed_again) {
+			result.push_back(i);
 		}
-		auto rows = metadata_manager->ConfigOptionRowCount(change.option);
+	}
+	return result;
+}
+
+bool DuckLakeTransaction::ConfigOptionsWrittenByOthers(vector<unique_ptr<QueryResult>> &counts) {
+	auto count = counts.begin();
+	for (auto i : LastConfigOptionChanges()) {
+		auto &change = config_option_undo[i];
+		auto rows = DuckLakeMetadataManager::ConfigOptionRowCount(**count++);
 		if (rows != change.metadata_rows) {
 			return true;
 		}
 		// under READ COMMITTED a set matches no row when another commit reset the option and set it again
-		if (!change.reset &&
-		    metadata_manager->ConfigOptionRowCount(change.option, &change.option.option.value) != rows) {
+		if (!change.reset && DuckLakeMetadataManager::ConfigOptionRowCount(**count++) != rows) {
 			return true;
 		}
 	}

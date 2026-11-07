@@ -398,8 +398,11 @@ private:
 	optional_idx EarlierConfigOptionChange(const DuckLakeConfigOption &option, idx_t change_index) const;
 	//! The rows an option is expected to have after a set, which an earlier change of the option decides
 	idx_t ConfigOptionRows(idx_t change_index, idx_t written_rows) const;
-	//! Whether other commits wrote rows of the options this transaction changed, which READ COMMITTED shows
-	bool ConfigOptionsWrittenByOthers();
+	//! The changes that are the last of their option, which decide the rows it has
+	vector<idx_t> LastConfigOptionChanges() const;
+	//! Whether other commits wrote rows of the options this transaction changed, which READ COMMITTED shows, from the
+	//! counts of the last changes: the rows of the option, then those with its value unless it was reset
+	bool ConfigOptionsWrittenByOthers(vector<unique_ptr<QueryResult>> &counts);
 	//! Writes the options of the transaction again, after a failed commit attempt rolled them back
 	void RewriteConfigOptions();
 	void ClearMaintenanceChanges();

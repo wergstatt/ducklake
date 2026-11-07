@@ -340,6 +340,8 @@ public:
 
 	virtual unique_ptr<QueryResult> Query(DuckLakeSnapshot snapshot, string &query);
 	virtual unique_ptr<QueryResult> Query(string &query);
+	//! Runs the reads one by one, each with a result of its own
+	virtual vector<unique_ptr<QueryResult>> Query(DuckLakeSnapshot snapshot, const DuckLakeReadBatch &batch);
 
 	//! Rvalue sugar so call sites can pass `R"(...)"` and `StringUtil::Format(...)` directly.
 	//! Named-rvalue decays to an lvalue inside, so the virtual dispatch still picks up the
@@ -413,8 +415,8 @@ public:
 	DuckLakeTableSchemaVersions GetTableSchemaVersions(TableIndex table_id, DuckLakeSnapshot snapshot);
 	//! The net row count of the data files that were committed before the snapshot's next file id
 	virtual idx_t GetNetDataFileRowCount(TableIndex table_id, DuckLakeSnapshot snapshot);
-	optional_idx GetNetDataFileRowCountForStats(TableIndex table_id, DuckLakeSnapshot snapshot);
-	virtual idx_t GetNetInlinedRowCount(const Identifier &inlined_table_name, DuckLakeSnapshot snapshot);
+	//! The number of rows of a table, in data files and inlined, or invalid if it cannot be computed exactly
+	optional_idx GetNetRowCount(DuckLakeTableEntry &table, DuckLakeSnapshot snapshot);
 	//! SQL builders for stats-refresh metadata lookups; caller substitutes placeholders + executes.
 	//! With require_exact, the count is NULL if any visible file is only partially visible to the snapshot.
 	//! With exclude_new_files, the files of the commit, which can already be in the catalog, are not counted.
@@ -660,6 +662,16 @@ public:
 	virtual idx_t SetConfigOption(const DuckLakeConfigOption &option);
 	virtual bool ResetConfigOption(const DuckLakeConfigOption &option);
 	idx_t ConfigOptionRowCount(const DuckLakeConfigOption &option, optional_ptr<const string> value = nullptr);
+	//! The read of the rows of the option, of those with the value if given
+	static DuckLakeStatement ConfigOptionRowCountSql(const DuckLakeConfigOption &option,
+	                                                 optional_ptr<const string> value = nullptr);
+	//! The count of a read of ConfigOptionRowCountSql
+	static idx_t ConfigOptionRowCount(QueryResult &result);
+	//! Runs the writes, then the reads, and sets the results of the reads unless the writes fail; where the catalog
+	//! can, in one round trip
+	virtual unique_ptr<QueryResult> ExecuteAndQuery(DuckLakeSnapshot snapshot, const string &writes,
+	                                                const DuckLakeReadBatch &reads,
+	                                                vector<unique_ptr<QueryResult>> &results);
 	virtual void MigrateV01();
 	virtual void MigrateV02(bool allow_failures = false);
 	virtual void MigrateV03(bool allow_failures = false);

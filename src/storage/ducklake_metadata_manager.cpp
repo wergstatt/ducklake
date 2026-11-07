@@ -1069,18 +1069,6 @@ idx_t DuckLakeMetadataManager::GetNetDataFileRowCount(TableIndex table_id, DuckL
 	// LCOV_EXCL_STOP
 }
 
-optional_idx DuckLakeMetadataManager::GetNetDataFileRowCountForStats(TableIndex table_id, DuckLakeSnapshot snapshot) {
-	auto query = GetNetDataFileRowCountSql(table_id, GetInlinedDeletionTableName(table_id, snapshot), true);
-	auto result = Query(snapshot, query);
-	result->ThrowIfError("Failed to get exact data file row count from DuckLake: ");
-	for (auto &row : *result) {
-		return OptIdx(row, 0);
-	}
-	// LCOV_EXCL_START
-	return optional_idx();
-	// LCOV_EXCL_STOP
-}
-
 string DuckLakeMetadataManager::GetNetInlinedRowCountSql(const Identifier &inlined_table_name,
                                                          const DuckLakeInlinedColNames &col_names) {
 	return StringUtil::Format(R"(
@@ -1102,15 +1090,28 @@ WHERE {SNAPSHOT_ID} >= %s)",
 	                          col_names.begin_snapshot);
 }
 
-idx_t DuckLakeMetadataManager::GetNetInlinedRowCount(const Identifier &inlined_table_name, DuckLakeSnapshot snapshot) {
-	auto result = Query(snapshot, GetNetInlinedRowCountSql(inlined_table_name, InlinedColNames()));
-	CheckInlinedDataReadError(*result, inlined_table_name);
-	for (auto &row : *result) {
-		return row.GetValue<idx_t>(0);
+optional_idx DuckLakeMetadataManager::GetNetRowCount(DuckLakeTableEntry &table, DuckLakeSnapshot snapshot) {
+	auto table_id = table.GetTableId();
+	DuckLakeReadBatch reads;
+	reads.Add({GetNetDataFileRowCountSql(table_id, GetInlinedDeletionTableName(table_id, snapshot), true)});
+	auto inlined_tables = table.GetInlinedDataTables(transaction, snapshot);
+	for (auto &inlined_table : inlined_tables) {
+		reads.Add({GetNetInlinedRowCountSql(inlined_table.table_name, InlinedColNames())});
 	}
-	// LCOV_EXCL_START
-	return 0;
-	// LCOV_EXCL_STOP
+	auto results = Query(snapshot, reads);
+	results[0]->ThrowIfError("Failed to get exact data file row count from DuckLake: ");
+	optional_idx row_count;
+	for (auto &row : *results[0]) {
+		row_count = OptIdx(row, 0);
+	}
+	for (idx_t i = 0; i < inlined_tables.size() && row_count.IsValid(); i++) {
+		auto &result = *results[i + 1];
+		CheckInlinedDataReadError(result, inlined_tables[i].table_name);
+		for (auto &row : result) {
+			row_count = row_count.GetIndex() + row.GetValue<idx_t>(0);
+		}
+	}
+	return row_count;
 }
 
 string DuckLakeMetadataManager::GetTableColumnSchemaSql(TableIndex table_id) {
@@ -3307,6 +3308,15 @@ unique_ptr<QueryResult> DuckLakeMetadataManager::Query(DuckLakeSnapshot snapshot
 unique_ptr<QueryResult> DuckLakeMetadataManager::Query(string &query) {
 	SubstituteCatalogPlaceholders(query);
 	return transaction.ExecuteRaw(query);
+}
+
+vector<unique_ptr<QueryResult>> DuckLakeMetadataManager::Query(DuckLakeSnapshot snapshot,
+                                                               const DuckLakeReadBatch &batch) {
+	vector<unique_ptr<QueryResult>> results;
+	for (auto &read : batch.GetReads()) {
+		results.push_back(Query(snapshot, read.ToSQL()));
+	}
+	return results;
 }
 
 unique_ptr<QueryResult> DuckLakeMetadataManager::Execute(string &&query) {
@@ -6404,22 +6414,57 @@ DELETE FROM {METADATA_CATALOG}.ducklake_metadata WHERE key = %s AND %s
 	return result->Fetch()->GetValue(0, 0).GetValue<idx_t>() > 0;
 }
 
-idx_t DuckLakeMetadataManager::ConfigOptionRowCount(const DuckLakeConfigOption &option,
-                                                    optional_ptr<const string> value) {
-	string scope;
-	string scope_id;
-	string scope_filter;
-	ConfigOptionScope(option, scope, scope_id, scope_filter);
-	if (value) {
-		scope_filter += StringUtil::Format(" AND value = %s", SQLString(*value));
+//! The scope of the option and its id
+static vector<Value> ConfigOptionScopeValues(const DuckLakeConfigOption &option) {
+	if (option.table_id.IsValid()) {
+		return {Value("table"), Value::UBIGINT(option.table_id.index)};
 	}
-	auto result = Query(StringUtil::Format(R"(
+	if (option.schema_id.IsValid()) {
+		return {Value("schema"), Value::UBIGINT(option.schema_id.index)};
+	}
+	return {Value(LogicalType::VARCHAR), Value(LogicalType::UBIGINT)};
+}
+
+DuckLakeStatement DuckLakeMetadataManager::ConfigOptionRowCountSql(const DuckLakeConfigOption &option,
+                                                                   optional_ptr<const string> value) {
+	DuckLakeStatement count {R"(
 SELECT COUNT(*)
 FROM {METADATA_CATALOG}.ducklake_metadata
-WHERE key = %s AND %s
-)",
-	                                       SQLString(option.option.key), scope_filter));
-	return result->Fetch()->GetValue(0, 0).GetValue<idx_t>();
+WHERE key = $1 AND )",
+	                         {Value(option.option.key)}};
+	if (option.table_id.IsValid() || option.schema_id.IsValid()) {
+		count.Append({"scope = $1 AND scope_id = $2", ConfigOptionScopeValues(option)});
+	} else {
+		count.sql += "scope IS NULL";
+	}
+	if (value) {
+		count.Append({" AND value = $1", {Value(*value)}});
+	}
+	count.sql += "\n";
+	return count;
+}
+
+idx_t DuckLakeMetadataManager::ConfigOptionRowCount(QueryResult &result) {
+	result.ThrowIfError("Failed to count the rows of a config option in DuckLake: ");
+	return result.Fetch()->GetValue(0, 0).GetValue<idx_t>();
+}
+
+idx_t DuckLakeMetadataManager::ConfigOptionRowCount(const DuckLakeConfigOption &option,
+                                                    optional_ptr<const string> value) {
+	DuckLakeReadBatch reads;
+	reads.Add(ConfigOptionRowCountSql(option, value));
+	return ConfigOptionRowCount(*Query(DuckLakeSnapshot(), reads)[0]);
+}
+
+unique_ptr<QueryResult> DuckLakeMetadataManager::ExecuteAndQuery(DuckLakeSnapshot snapshot, const string &writes,
+                                                                 const DuckLakeReadBatch &reads,
+                                                                 vector<unique_ptr<QueryResult>> &results) {
+	auto query = writes;
+	auto result = Execute(snapshot, query);
+	if (!result->HasError()) {
+		results = Query(snapshot, reads);
+	}
+	return result;
 }
 
 idx_t DuckLakeMetadataManager::SetConfigOption(const DuckLakeConfigOption &option) {
@@ -6434,10 +6479,13 @@ idx_t DuckLakeMetadataManager::SetConfigOption(const DuckLakeConfigOption &optio
 	unique_ptr<QueryResult> result;
 	if (count == 0) {
 		// option does not yet exist - insert the value
-		result = Execute(StringUtil::Format(R"(
-INSERT INTO {METADATA_CATALOG}.ducklake_metadata VALUES (%s, %s, %s, %s)
-)",
-		                                    SQLString(option_key), SQLString(option_value), scope, scope_id));
+		vector<Value> values {Value(option_key), Value(option_value)};
+		for (auto &value : ConfigOptionScopeValues(option)) {
+			values.push_back(value);
+		}
+		result = Execute(DuckLakeSnapshot(),
+		                 DuckLakeStatement {"INSERT INTO {METADATA_CATALOG}.ducklake_metadata VALUES ($1, $2, $3, $4)",
+		                                    std::move(values)});
 	} else {
 		// update the option, or insert it when another commit removed it under READ COMMITTED
 		result = Execute(StringUtil::Format(R"(

@@ -240,11 +240,16 @@ bool PostgresMetadataManager::ShowsConcurrentCommits() const {
 	       StringUtil::CIEquals(isolation_level->second.ToString(), "READ COMMITTED");
 }
 
-//! The function of postgres_scanner that runs statements with their parameters in one round trip, if it has one
-static optional_ptr<CatalogEntry> PipelineFunction(ClientContext &context) {
+//! The function of postgres_scanner with this name, if it has one
+static optional_ptr<CatalogEntry> ScannerFunction(ClientContext &context, const string &name) {
 	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
 	auto &schema = Catalog::GetSystemCatalog(context).GetSchema(transaction, Identifier::DefaultSchema());
-	return schema.GetEntry(transaction, CatalogType::TABLE_FUNCTION_ENTRY, Identifier("postgres_execute_pipeline"));
+	return schema.GetEntry(transaction, CatalogType::TABLE_FUNCTION_ENTRY, Identifier(name));
+}
+
+//! The function of postgres_scanner that runs statements with their parameters in one round trip, if it has one
+static optional_ptr<CatalogEntry> PipelineFunction(ClientContext &context) {
+	return ScannerFunction(context, "postgres_execute_pipeline");
 }
 
 bool PostgresMetadataManager::InsertsInlinedRowsAfterBatch(idx_t row_count, idx_t column_count) const {
@@ -561,7 +566,55 @@ unique_ptr<QueryResult> PostgresMetadataManager::Execute(DuckLakeSnapshot snapsh
 	// casts of float bounds to text keep their exact value
 	DuckLakeBatch pipeline("SET LOCAL extra_float_digits = 3");
 	pipeline += batch;
-	return ExecutePipeline(snapshot, pipeline);
+	return ExecutePipeline(snapshot, pipeline.SplitStatements());
+}
+
+vector<unique_ptr<QueryResult>> PostgresMetadataManager::Query(DuckLakeSnapshot snapshot,
+                                                               const DuckLakeReadBatch &batch) {
+	if (!ScannerFunction(*transaction.GetConnection().context, "postgres_pipeline_result")) {
+		return DuckLakeMetadataManager::Query(snapshot, batch);
+	}
+	vector<unique_ptr<QueryResult>> results;
+	for (auto &scan : KeepResults(snapshot, batch)) {
+		results.push_back(transaction.ExecuteRaw(scan));
+	}
+	return results;
+}
+
+vector<string> PostgresMetadataManager::KeepResults(DuckLakeSnapshot snapshot, const DuckLakeReadBatch &batch) {
+	auto pipeline = ExecutePipeline(snapshot, batch.GetReads(), true);
+	pipeline->ThrowIfError("Failed to read the DuckLake metadata: ");
+	return KeptResultScans(*pipeline);
+}
+
+vector<string> PostgresMetadataManager::KeptResultScans(QueryResult &pipeline) {
+	auto catalog_literal = SQLString::ToString(transaction.GetCatalog().MetadataDatabaseName().GetIdentifierName());
+	vector<string> scans;
+	for (auto &row : pipeline) {
+		// a write keeps no result
+		if (!row.IsNull(1)) {
+			scans.push_back(StringUtil::Format("FROM postgres_pipeline_result(%s, %d)", catalog_literal,
+			                                   row.GetValue<int64_t>(1)));
+		}
+	}
+	return scans;
+}
+
+unique_ptr<QueryResult> PostgresMetadataManager::ExecuteAndQuery(DuckLakeSnapshot snapshot, const string &writes,
+                                                                 const DuckLakeReadBatch &reads,
+                                                                 vector<unique_ptr<QueryResult>> &results) {
+	if (!ScannerFunction(*transaction.GetConnection().context, "postgres_pipeline_result")) {
+		return DuckLakeMetadataManager::ExecuteAndQuery(snapshot, writes, reads, results);
+	}
+	auto statements = DuckLakeBatch(writes).SplitStatements();
+	statements.insert(statements.end(), reads.GetReads().begin(), reads.GetReads().end());
+	auto pipeline = ExecutePipeline(snapshot, statements, true);
+	if (!pipeline->HasError()) {
+		for (auto &scan : KeptResultScans(*pipeline)) {
+			results.push_back(transaction.ExecuteRaw(scan));
+		}
+	}
+	return pipeline;
 }
 
 //! Whether the pipeline of postgres_scanner can end with the COMMIT of its transaction
@@ -587,16 +640,17 @@ unique_ptr<QueryResult> PostgresMetadataManager::ExecuteAndCommit(DuckLakeSnapsh
 	}
 	DuckLakeBatch pipeline("SET LOCAL extra_float_digits = 3");
 	pipeline += batch;
-	return ExecutePipeline(snapshot, pipeline, commit_sent);
+	return ExecutePipeline(snapshot, pipeline.SplitStatements(), false, commit_sent);
 }
 
-unique_ptr<QueryResult> PostgresMetadataManager::ExecutePipeline(DuckLakeSnapshot snapshot, const DuckLakeBatch &batch,
-                                                                 optional_ptr<bool> commit_sent) {
+unique_ptr<QueryResult> PostgresMetadataManager::ExecutePipeline(DuckLakeSnapshot snapshot,
+                                                                 const vector<DuckLakeStatement> &batch,
+                                                                 bool keep_results, optional_ptr<bool> commit_sent) {
 	auto &ducklake_catalog = transaction.GetCatalog();
 	auto schema_identifier = SQLQuotedIdentifier::ToString(ducklake_catalog.MetadataSchemaName());
 	vector<Value> statements;
-	executed_queries.clear();
-	for (auto &statement : batch.SplitStatements()) {
+	vector<string> queries;
+	for (auto &statement : batch) {
 		auto query = statement.sql;
 		SubstituteTransactionPlaceholders(snapshot, query);
 		SubstituteCatalogPlaceholders(query, schema_identifier);
@@ -608,20 +662,27 @@ unique_ptr<QueryResult> PostgresMetadataManager::ExecutePipeline(DuckLakeSnapsho
 		}
 		statements.push_back(
 		    Value::STRUCT({{"query", Value(query)}, {"params", Value::LIST(LogicalType::VARCHAR, std::move(params))}}));
-		executed_queries.push_back(std::move(query));
+		queries.push_back(std::move(query));
 	}
 	if (commit_sent) {
 		// the scanner names the COMMIT that it sends after the statements by its query
-		executed_queries.push_back("COMMIT");
+		queries.push_back("COMMIT");
+	}
+	auto logged_query = StringUtil::Join(queries, ";\n");
+	if (!keep_results) {
+		// only the error of a commit is looked up in its queries, while reads can run on several threads at once
+		executed_queries = std::move(queries);
+	}
+	if (commit_sent) {
 		// from here on, a lost connection leaves it unknown whether the COMMIT took effect
 		*commit_sent = true;
 	}
 	auto catalog_literal = SQLString::ToString(ducklake_catalog.MetadataDatabaseName().GetIdentifierName());
-	auto query = StringUtil::Format("FROM postgres_execute_pipeline(%s, $1%s)", catalog_literal,
-	                                commit_sent ? ", commit := true" : "");
+	string options = keep_results ? ", keep_results := true" : "";
+	options += commit_sent ? ", commit := true" : "";
+	auto query = StringUtil::Format("FROM postgres_execute_pipeline(%s, $1%s)", catalog_literal, options);
 	// the values stay out of the query, and so out of its logs
-	return transaction.ExecuteRaw(query, {Value::LIST(std::move(statements))},
-	                              StringUtil::Join(executed_queries, ";\n"));
+	return transaction.ExecuteRaw(query, {Value::LIST(std::move(statements))}, logged_query);
 }
 
 unique_ptr<QueryResult> PostgresMetadataManager::ExecuteDropInTransaction(string &query) {

@@ -54,6 +54,11 @@ public:
 	unique_ptr<QueryResult> ExecuteAndCommit(DuckLakeSnapshot snapshot, const DuckLakeBatch &batch,
 	                                         bool &commit_sent) override;
 	unique_ptr<QueryResult> ExecuteDropInTransaction(string &query) override;
+	using DuckLakeMetadataManager::Query;
+	vector<unique_ptr<QueryResult>> Query(DuckLakeSnapshot snapshot, const DuckLakeReadBatch &batch) override;
+	unique_ptr<QueryResult> ExecuteAndQuery(DuckLakeSnapshot snapshot, const string &writes,
+	                                        const DuckLakeReadBatch &reads,
+	                                        vector<unique_ptr<QueryResult>> &results) override;
 
 	void ClearCache() override;
 	//! postgres_scanner looks up a table it has not cached
@@ -79,10 +84,14 @@ protected:
 private:
 	//! Where the server error starts in the error of the last Execute, and which of its queries failed
 	optional_idx BatchServerErrorStart(const string &message, optional_ptr<idx_t> failed_query = nullptr) const;
-	//! Runs the statements of a batch in one round trip, with their values as parameters. With commit_sent, the
-	//! COMMIT of the transaction follows them, and commit_sent is set before it goes out
-	unique_ptr<QueryResult> ExecutePipeline(DuckLakeSnapshot snapshot, const DuckLakeBatch &batch,
-	                                        optional_ptr<bool> commit_sent = nullptr);
+	//! Runs statements in one round trip, with their values as parameters, keeping the results of reads if asked.
+	//! With commit_sent, the COMMIT of the transaction follows them, and commit_sent is set before it goes out
+	unique_ptr<QueryResult> ExecutePipeline(DuckLakeSnapshot snapshot, const vector<DuckLakeStatement> &batch,
+	                                        bool keep_results = false, optional_ptr<bool> commit_sent = nullptr);
+	//! Runs the reads in one round trip, and returns a query that scans the kept result of each
+	vector<string> KeepResults(DuckLakeSnapshot snapshot, const DuckLakeReadBatch &batch);
+	//! A query that scans each result that a pipeline kept
+	vector<string> KeptResultScans(QueryResult &pipeline);
 
 	//! The queries of the last Execute, one of which the scanner repeats in front of a server error
 	vector<string> executed_queries;
