@@ -475,7 +475,7 @@ public:
 	bool TryAppendDataFiles(DuckLakeSnapshot &commit_snapshot, const vector<DuckLakeFileInfo> &new_files,
 	                        const vector<DuckLakeTableInfo> &new_tables,
 	                        vector<DuckLakeSchemaInfo> &new_schemas_result);
-	virtual string WriteNewInlinedData(DuckLakeSnapshot &commit_snapshot,
+	virtual string WriteNewInlinedData(DuckLakeSnapshot &commit_snapshot, DuckLakeSnapshot transaction_snapshot,
 	                                   const vector<DuckLakeInlinedDataInfo> &new_data,
 	                                   const vector<DuckLakeTableInfo> &new_tables,
 	                                   const vector<DuckLakeTableInfo> &new_inlined_data_tables_result,

@@ -3871,6 +3871,7 @@ static unique_ptr<SQLStatement> InlinedDataInsert(DuckLakeTransaction &transacti
 }
 
 string DuckLakeMetadataManager::WriteNewInlinedData(DuckLakeSnapshot &commit_snapshot,
+                                                    DuckLakeSnapshot transaction_snapshot,
                                                     const vector<DuckLakeInlinedDataInfo> &new_data,
                                                     const vector<DuckLakeTableInfo> &new_tables,
                                                     const vector<DuckLakeTableInfo> &new_inlined_data_tables_result,
@@ -3897,10 +3898,18 @@ string DuckLakeMetadataManager::WriteNewInlinedData(DuckLakeSnapshot &commit_sna
 			inlined_table_name = it->second;
 		}
 		DuckLakeTableSchemaVersions schema_versions;
+		optional_ptr<CatalogEntry> cached_table;
 		if (!new_inlined_table) {
 			schema_versions = transaction.GetCatalog().GetTableSchemaVersions(transaction, entry.table_id);
+			// a new inlined table raises the schema version, so the catalog of an unchanged version holds them all
+			if (transaction.GetSnapshot().schema_version == transaction_snapshot.schema_version) {
+				cached_table = transaction.GetCatalog().GetEntryById(transaction, transaction_snapshot, entry.table_id);
+			}
 		}
-		if (inlined_table_name.empty() && !new_inlined_table) {
+		if (inlined_table_name.empty() && cached_table) {
+			inlined_table_name =
+			    cached_table->Cast<DuckLakeTableEntry>().CurrentInlinedDataTable(schema_versions.last_change);
+		} else if (inlined_table_name.empty() && !new_inlined_table) {
 			auto query = LatestInlinedTableQuery(entry.table_id.index) + ";";
 			auto result = Query(commit_snapshot, query);
 			for (auto &row : *result) {
