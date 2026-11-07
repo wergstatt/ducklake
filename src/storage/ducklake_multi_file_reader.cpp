@@ -437,10 +437,25 @@ ReaderInitializeType DuckLakeMultiFileReader::InitializeReader(MultiFileReaderDa
 	return result;
 }
 
+//! Whether the table of the scan has the columns of an inlined data table of the schema version
+static bool HasInlinedTableColumns(DuckLakeFunctionInfo &read_info, idx_t schema_version) {
+	auto &table = read_info.table;
+	if (table.IsTransactionLocal() || schema_version > read_info.snapshot.schema_version) {
+		// an altered table, or a scan of an older snapshot that also reads the inlined tables of later versions
+		return false;
+	}
+	if (schema_version == read_info.snapshot.schema_version) {
+		return true;
+	}
+	auto transaction = read_info.GetTransaction();
+	auto schema_versions = transaction->GetCatalog().GetTableSchemaVersions(*transaction, table.GetTableId());
+	return DuckLakeTableEntry::IsCurrentInlinedDataTable(schema_version, schema_versions.last_change);
+}
+
 bool DuckLakeMultiFileReader::GetInlinedTableColumns(DuckLakeFunctionInfo &read_info, optional_idx schema_version,
                                                      vector<MultiFileColumnDefinition> &columns) {
 	reference<DuckLakeTableEntry> schema_table = read_info.table;
-	if (schema_version.IsValid()) {
+	if (schema_version.IsValid() && !HasInlinedTableColumns(read_info, schema_version.GetIndex())) {
 		// read the table at the specified version
 		auto transaction = read_info.GetTransaction();
 		auto &catalog = transaction->GetCatalog();
