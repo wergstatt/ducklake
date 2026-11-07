@@ -514,15 +514,19 @@ void PostgresMetadataManager::ClearCache() {
 	auto &catalog = transaction.GetCatalog();
 	if (catalog.ScopedCacheClear()) {
 		auto catalog_literal = SQLString::ToString(catalog.MetadataDatabaseName().GetIdentifierName());
-		auto result = transaction.ExecuteRaw(StringUtil::Format(
-		    "SELECT * FROM postgres_query(%s, 'SELECT 1', clear_catalog_cache = true);", catalog_literal));
-		if (!result->HasError()) {
-			return;
+		// without a query where the postgres_scanner can, else with one
+		for (auto clear : {"CALL postgres_clear_cache(catalog := %s);",
+		                   "SELECT * FROM postgres_query(%s, 'SELECT 1', clear_catalog_cache = true);"}) {
+			auto result = transaction.ExecuteRaw(StringUtil::Format(clear, catalog_literal));
+			if (!result->HasError()) {
+				return;
+			}
+			// the error of a postgres_scanner from before the parameter
+			if (!StringUtil::Contains(result->GetError(), "Invalid named parameter")) {
+				result->ThrowIfError("Failed to clear the PostgreSQL metadata cache: ");
+			}
 		}
-		// the error of a postgres_scanner from before the option, which can only clear every catalog
-		if (!StringUtil::Contains(result->GetError(), "Invalid named parameter \"clear_catalog_cache\"")) {
-			result->ThrowIfError("Failed to clear the PostgreSQL metadata cache: ");
-		}
+		// a postgres_scanner from before both can only clear every catalog
 		catalog.SetScopedCacheClear(false);
 	}
 	auto result = transaction.ExecuteRaw("CALL postgres_clear_cache();");
