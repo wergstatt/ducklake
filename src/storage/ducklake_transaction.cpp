@@ -1678,11 +1678,16 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 	auto config_option_lock = ConfigOptionLockSql();
 	context.locks_config_options = !config_option_lock.empty();
 	bool option_lock_failed = false;
-	context.execute_commit_batch = [&](DuckLakeSnapshot snapshot, const DuckLakeBatch &query) {
+	context.execute_commit_batch = [&](DuckLakeSnapshot snapshot, const DuckLakeBatch &query,
+	                                   optional_ptr<bool> commit_sent) {
 		option_lock_failed = false;
 		unique_ptr<QueryResult> result;
+		// the inlined inserts, the lock of the options and the cache clear run after the batch
+		bool commit = commit_sent && inlined_inserts.empty() && config_option_lock.empty() &&
+		              !metadata_manager->HasPendingCacheClear();
 		if (!query.empty()) {
-			result = metadata_manager->Execute(snapshot, query);
+			result = commit ? metadata_manager->ExecuteAndCommit(snapshot, query, *commit_sent)
+			                : metadata_manager->Execute(snapshot, query);
 		}
 		for (auto &insert : inlined_inserts) {
 			if (result->HasError()) {
@@ -1714,6 +1719,9 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 	};
 	context.commit_error_without_query = [&](const string &message) {
 		return metadata_manager->CommitErrorWithoutQuery(message);
+	};
+	context.failed_before_commit = [&](const string &message) {
+		return metadata_manager->FailedBeforeCommit(message);
 	};
 	context.commit_error_hint = [&](const string &message) {
 		if (context.skip_retry()) {

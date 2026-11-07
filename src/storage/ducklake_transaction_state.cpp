@@ -2805,6 +2805,7 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 	for (idx_t i = 0;; i++) {
 		bool can_retry;
 		bool retryable_metadata_error = false;
+		bool commit_sent = false;
 		auto attempt_changes = transaction_changes;
 		auto attempt_dropped_file_stats = dropped_file_stats;
 		try {
@@ -2833,6 +2834,7 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 			wrote_snapshot = context.write_snapshot &&
 			                 (!expired_snapshots.empty() || !expiry.tags.empty() || !context.only_expires_snapshots);
 			if (!wrote_snapshot && !context.locks_config_options) {
+				commit_sent = true;
 				context.commit_connection();
 				break;
 			}
@@ -2859,7 +2861,9 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 				batch_queries = DuckLakeMetadataManager::InsertSnapshotSql(commit_snapshot);
 				batch_queries += std::move(changes);
 			}
-			auto res = context.execute_commit_batch(commit_snapshot, batch_queries);
+			// where nothing runs after the batch, it can carry the COMMIT of the metadata transaction
+			auto res = context.execute_commit_batch(commit_snapshot, batch_queries,
+			                                        expired_snapshots.empty() ? &commit_sent : nullptr);
 			if (res->HasError()) {
 				auto &commit_error = res->GetErrorObject();
 				retryable_metadata_error = context.is_retryable_metadata_error(commit_error.RawMessage());
@@ -2870,6 +2874,7 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 			}
 			flushed_inlined = !flushed_inlined_tables.empty();
 			context.flush_cache_if_pending();
+			commit_sent = true;
 			context.commit_connection();
 			new_entry_oids = std::move(commit_state.new_entry_oids);
 			break;
@@ -2879,11 +2884,11 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 			retryable_metadata_error =
 			    retryable_metadata_error || context.is_retryable_metadata_error(error.RawMessage());
 			auto error_without_query = context.commit_error_without_query(error.RawMessage());
-			// an internal error is a bug that a retry cannot fix
 			// a retryable metadata error in the conflict check is retried, a conflict that it finds is not
-			bool retry_on_error =
-			    error.Type() != ExceptionType::INTERNAL && !context.skip_retry() &&
-			    (retryable_metadata_error || (can_retry && DuckLakeTransaction::RetryOnError(error_without_query)));
+			bool retryable =
+			    retryable_metadata_error || (can_retry && DuckLakeTransaction::RetryOnError(error_without_query));
+			// an internal error is a bug that a retry cannot fix
+			bool retry_on_error = error.Type() != ExceptionType::INTERNAL && !context.skip_retry() && retryable;
 			if (retry_on_error) {
 				try {
 					context.verify_retry();
@@ -2901,8 +2906,17 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 			}
 			if (!retry_on_error || finished_retrying) {
 				// we abort after the max retry count
-				CleanupFiles();
+				// once the commit was sent, only a conflict that the retry rules recognise has surely rolled back
+				bool rolled_back = !commit_sent || retryable || context.failed_before_commit(error.RawMessage());
+				if (rolled_back) {
+					CleanupFiles();
+				}
 				string error_message = "Failed to commit DuckLake transaction.\n";
+				if (!rolled_back) {
+					error_message += "The commit failed after it was sent to the metadata catalog, so whether it took "
+					                 "effect is unknown. The files it wrote are kept, ducklake_delete_orphaned_files "
+					                 "removes them if it did not.\n";
+				}
 				// only an error that another retry could solve gets the advice to raise the retry count
 				if (retry_on_error) {
 					auto suggested_count =

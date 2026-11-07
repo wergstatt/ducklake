@@ -245,6 +245,11 @@ public:
 	virtual string CommitErrorWithoutQuery(const string &message) const {
 		return message;
 	}
+	//! Whether the error of a batch that ExecuteAndCommit sent with the COMMIT stopped it before the COMMIT, so that
+	//! the commit surely did not take effect
+	virtual bool FailedBeforeCommit(const string &message) const {
+		return false;
+	}
 	//! Advice added to the error of a commit that failed for good
 	virtual string CommitErrorHint(const string &message) const;
 	//! SQL that the commit of a transaction that changed options runs, so two commits cannot both insert an option
@@ -268,6 +273,9 @@ public:
 		if (NewTablesRequireCacheClear()) {
 			pending_cache_clear = true;
 		}
+	}
+	bool HasPendingCacheClear() const {
+		return pending_cache_clear;
 	}
 	bool TakePendingCacheClear() {
 		bool pending = pending_cache_clear;
@@ -317,6 +325,13 @@ public:
 
 	virtual unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, string &query);
 	virtual unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, const DuckLakeBatch &batch);
+	//! Runs the statements of a batch, followed by the COMMIT of the metadata transaction in the same round trip where
+	//! the catalog can, which sets commit_sent before it goes out. The metadata connection is committed afterwards
+	//! either way, which then sends nothing
+	virtual unique_ptr<QueryResult> ExecuteAndCommit(DuckLakeSnapshot snapshot, const DuckLakeBatch &batch,
+	                                                 bool &commit_sent) {
+		return Execute(snapshot, batch);
+	}
 	virtual unique_ptr<QueryResult> Execute(string &query);
 	//! Runs the statements in a transaction of their own, rolled back when one of them fails
 	virtual unique_ptr<QueryResult> ExecuteInTransaction(string &query);

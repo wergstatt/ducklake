@@ -659,8 +659,8 @@ DuckLakeCommitContext DuckLakeServerSideCommit::BuildContext(idx_t &committed_sn
 	ctx.get_snapshot = [this]() {
 		return transaction_snapshot;
 	};
-	ctx.execute_commit_batch = [this](DuckLakeSnapshot snapshot,
-	                                  const DuckLakeBatch &batch) -> unique_ptr<QueryResult> {
+	ctx.execute_commit_batch = [this](DuckLakeSnapshot snapshot, const DuckLakeBatch &batch,
+	                                  optional_ptr<bool>) -> unique_ptr<QueryResult> {
 		auto query = SubstitutePlaceholders(batch.ToSQL(), snapshot);
 		return fresh_conn.Query(query);
 	};

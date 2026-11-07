@@ -10,6 +10,7 @@
 #include "duckdb/common/vector/list_vector.hpp"
 #include "duckdb/common/vector/struct_vector.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 
 namespace duckdb {
 
@@ -369,7 +370,8 @@ string PostgresMetadataManager::GetColumnTypeInternal(const LogicalType &column_
 	}
 }
 
-optional_idx PostgresMetadataManager::BatchServerErrorStart(const string &message) const {
+optional_idx PostgresMetadataManager::BatchServerErrorStart(const string &message,
+                                                            optional_ptr<idx_t> failed_query) const {
 	// the batch and the server error can contain any text, so the batch is found by its size
 	// the scanner names a failed statement "query", or in a pipeline by its position, and then quotes it
 	const string failed_batch = "Failed to execute ";
@@ -382,10 +384,14 @@ optional_idx PostgresMetadataManager::BatchServerErrorStart(const string &messag
 		return optional_idx();
 	}
 	batch_start++;
-	for (auto &query : executed_queries) {
+	for (idx_t i = 0; i < executed_queries.size(); i++) {
+		auto &query = executed_queries[i];
 		auto batch_end = batch_start + query.size();
 		if (batch_end + 3 <= message.size() && message.compare(batch_start, query.size(), query) == 0 &&
 		    message.compare(batch_end, 3, "\": ") == 0) {
+			if (failed_query) {
+				*failed_query = i;
+			}
 			return batch_end;
 		}
 	}
@@ -395,6 +401,27 @@ optional_idx PostgresMetadataManager::BatchServerErrorStart(const string &messag
 string PostgresMetadataManager::CommitErrorWithoutQuery(const string &message) const {
 	auto server_error_start = BatchServerErrorStart(message);
 	return server_error_start.IsValid() ? message.substr(server_error_start.GetIndex()) : message;
+}
+
+bool PostgresMetadataManager::FailedBeforeCommit(const string &message) const {
+	idx_t failed_query = 0;
+	auto server_error_start = BatchServerErrorStart(message, failed_query);
+	// the server may fail a COMMIT, such as by ending the session, after it took effect
+	if (!server_error_start.IsValid() || executed_queries[failed_query] == "COMMIT") {
+		return false;
+	}
+	// the scanner can say in front of the failed query that the COMMIT went out before it lost the connection
+	if (StringUtil::Contains(message.substr(0, message.find("Failed to execute ")), "SQLSTATE")) {
+		return false;
+	}
+	// the server stops the pipeline at a statement that it fails, so the COMMIT after it does not run. The scanner
+	// gives the error of the server with its SQLSTATE, and that of a lost connection without one
+	auto server_error = message.substr(server_error_start.GetIndex());
+	StringUtil::RTrim(server_error);
+	const string sqlstate = "(SQLSTATE ";
+	auto sqlstate_start = server_error.rfind(sqlstate);
+	return sqlstate_start != string::npos && sqlstate_start + sqlstate.size() + 6 == server_error.size() &&
+	       server_error.back() == ')';
 }
 
 bool PostgresMetadataManager::IsRetryableCommitError(const string &message) const {
@@ -537,8 +564,34 @@ unique_ptr<QueryResult> PostgresMetadataManager::Execute(DuckLakeSnapshot snapsh
 	return ExecutePipeline(snapshot, pipeline);
 }
 
-unique_ptr<QueryResult> PostgresMetadataManager::ExecutePipeline(DuckLakeSnapshot snapshot,
-                                                                 const DuckLakeBatch &batch) {
+//! Whether the pipeline of postgres_scanner can end with the COMMIT of its transaction
+static bool PipelineCommits(ClientContext &context) {
+	auto pipeline = PipelineFunction(context);
+	if (!pipeline) {
+		return false;
+	}
+	auto &functions = pipeline->Cast<TableFunctionCatalogEntry>().functions;
+	for (idx_t i = 0; i < functions.Size(); i++) {
+		auto options = functions.GetFunctionByOffset(i)->GetSignature().GetTypedKwargs();
+		if (options && options->Find(Identifier("commit"))) {
+			return true;
+		}
+	}
+	return false;
+}
+
+unique_ptr<QueryResult> PostgresMetadataManager::ExecuteAndCommit(DuckLakeSnapshot snapshot, const DuckLakeBatch &batch,
+                                                                  bool &commit_sent) {
+	if (!PipelineCommits(*transaction.GetConnection().context)) {
+		return Execute(snapshot, batch);
+	}
+	DuckLakeBatch pipeline("SET LOCAL extra_float_digits = 3");
+	pipeline += batch;
+	return ExecutePipeline(snapshot, pipeline, commit_sent);
+}
+
+unique_ptr<QueryResult> PostgresMetadataManager::ExecutePipeline(DuckLakeSnapshot snapshot, const DuckLakeBatch &batch,
+                                                                 optional_ptr<bool> commit_sent) {
 	auto &ducklake_catalog = transaction.GetCatalog();
 	auto schema_identifier = SQLQuotedIdentifier::ToString(ducklake_catalog.MetadataSchemaName());
 	vector<Value> statements;
@@ -557,10 +610,18 @@ unique_ptr<QueryResult> PostgresMetadataManager::ExecutePipeline(DuckLakeSnapsho
 		    Value::STRUCT({{"query", Value(query)}, {"params", Value::LIST(LogicalType::VARCHAR, std::move(params))}}));
 		executed_queries.push_back(std::move(query));
 	}
+	if (commit_sent) {
+		// the scanner names the COMMIT that it sends after the statements by its query
+		executed_queries.push_back("COMMIT");
+		// from here on, a lost connection leaves it unknown whether the COMMIT took effect
+		*commit_sent = true;
+	}
 	auto catalog_literal = SQLString::ToString(ducklake_catalog.MetadataDatabaseName().GetIdentifierName());
+	auto query = StringUtil::Format("FROM postgres_execute_pipeline(%s, $1%s)", catalog_literal,
+	                                commit_sent ? ", commit := true" : "");
 	// the values stay out of the query, and so out of its logs
-	return transaction.ExecuteRaw(StringUtil::Format("FROM postgres_execute_pipeline(%s, $1)", catalog_literal),
-	                              {Value::LIST(std::move(statements))}, StringUtil::Join(executed_queries, ";\n"));
+	return transaction.ExecuteRaw(query, {Value::LIST(std::move(statements))},
+	                              StringUtil::Join(executed_queries, ";\n"));
 }
 
 unique_ptr<QueryResult> PostgresMetadataManager::ExecuteDropInTransaction(string &query) {

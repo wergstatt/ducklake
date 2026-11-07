@@ -46,10 +46,13 @@ public:
 	void MigrateInlinedDataTypes() override;
 	bool IsRetryableCommitError(const string &message) const override;
 	string CommitErrorWithoutQuery(const string &message) const override;
+	bool FailedBeforeCommit(const string &message) const override;
 	string ConfigOptionLockSql() const override;
 
 	unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, string &query) override;
 	unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, const DuckLakeBatch &batch) override;
+	unique_ptr<QueryResult> ExecuteAndCommit(DuckLakeSnapshot snapshot, const DuckLakeBatch &batch,
+	                                         bool &commit_sent) override;
 	unique_ptr<QueryResult> ExecuteDropInTransaction(string &query) override;
 
 	void ClearCache() override;
@@ -74,10 +77,12 @@ protected:
 	string CastStatsToTarget(const string &stats, const LogicalType &type, StatsCastType cast_type) override;
 
 private:
-	//! Where the server error starts in the error of the last Execute
-	optional_idx BatchServerErrorStart(const string &message) const;
-	//! Runs the statements of a batch in one round trip, with their values as parameters
-	unique_ptr<QueryResult> ExecutePipeline(DuckLakeSnapshot snapshot, const DuckLakeBatch &batch);
+	//! Where the server error starts in the error of the last Execute, and which of its queries failed
+	optional_idx BatchServerErrorStart(const string &message, optional_ptr<idx_t> failed_query = nullptr) const;
+	//! Runs the statements of a batch in one round trip, with their values as parameters. With commit_sent, the
+	//! COMMIT of the transaction follows them, and commit_sent is set before it goes out
+	unique_ptr<QueryResult> ExecutePipeline(DuckLakeSnapshot snapshot, const DuckLakeBatch &batch,
+	                                        optional_ptr<bool> commit_sent = nullptr);
 
 	//! The queries of the last Execute, one of which the scanner repeats in front of a server error
 	vector<string> executed_queries;

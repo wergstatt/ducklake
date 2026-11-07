@@ -45,8 +45,10 @@ struct DuckLakeCommitContext {
 	//! Rewrites the delete files whose new deletes are not dated to the commit snapshot.
 	std::function<void(idx_t)> set_delete_commit_snapshot = [](idx_t) {
 	};
-	//! Executes the batched snapshot/changes SQL against the metadata DB.
-	std::function<unique_ptr<QueryResult>(DuckLakeSnapshot, const DuckLakeBatch &)> execute_commit_batch;
+	//! Executes the batched snapshot/changes SQL against the metadata DB. With commit_sent, the batch can carry the
+	//! COMMIT of the metadata transaction, and sets commit_sent before that goes out
+	std::function<unique_ptr<QueryResult>(DuckLakeSnapshot, const DuckLakeBatch &, optional_ptr<bool> commit_sent)>
+	    execute_commit_batch;
 	//! Classifies metadata-catalog errors that are safe to retry.
 	std::function<bool(const string &)> is_retryable_metadata_error = [](const string &) {
 		return false;
@@ -54,6 +56,10 @@ struct DuckLakeCommitContext {
 	//! The commit error without the failed query text that it repeats.
 	std::function<string(const string &)> commit_error_without_query = [](const string &message) {
 		return message;
+	};
+	//! Whether the error of a batch that carried the COMMIT stopped it before the COMMIT.
+	std::function<bool(const string &)> failed_before_commit = [](const string &) {
+		return false;
 	};
 	//! Advice for a commit error that is not retried.
 	std::function<string(const string &)> commit_error_hint = [](const string &) {
