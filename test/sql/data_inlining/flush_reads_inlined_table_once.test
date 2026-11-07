@@ -1,0 +1,37 @@
+# name: test/sql/data_inlining/flush_reads_inlined_table_once.test
+# description: A flush reads the rows and end snapshots of an inlined table in one query
+# group: [data_inlining]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/flush_reads_inlined_table_once', DATA_INLINING_ROW_LIMIT 10)
+
+statement ok
+CREATE TABLE ducklake.t (i INTEGER)
+
+statement ok
+INSERT INTO ducklake.t VALUES (1), (2)
+
+statement ok
+CALL enable_logging('DuckLakeMetadata')
+
+query I
+SELECT rows_flushed FROM ducklake_flush_inlined_data('ducklake')
+----
+2
+
+statement ok
+CALL disable_logging()
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('DuckLakeMetadata')
+WHERE query LIKE '%ducklake_inlined_data_1_1%' AND query NOT LIKE '%DELETE FROM%'
+----
+1
