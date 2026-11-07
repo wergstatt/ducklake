@@ -13,15 +13,15 @@ struct CleanupBindData : public MetadataBindData {
 	explicit CleanupBindData(DuckLakeCatalog &catalog, CleanupType type) : catalog(catalog), type(type) {
 	}
 
-	string GetFilter() const {
+	DuckLakeStatement GetFilter() const {
 		if (timestamp_filter.empty()) {
-			return "";
+			return {};
 		}
 		switch (type) {
 		case CleanupType::OLD_FILES:
-			return StringUtil::Format("WHERE schedule_start::TIMESTAMPTZ < '%s'", timestamp_filter);
+			return {"WHERE CAST(schedule_start AS TIMESTAMPTZ) < $1", {Value(timestamp_filter)}};
 		case CleanupType::ORPHANED_FILES:
-			return StringUtil::Format(" AND last_modified::TIMESTAMPTZ < '%s'", timestamp_filter);
+			return {" AND last_modified::TIMESTAMPTZ < $1", {Value(timestamp_filter)}};
 		default:
 			throw InternalException("Unknown Cleanup type for GetFilter()");
 		}

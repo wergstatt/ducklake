@@ -54,6 +54,8 @@ public:
 	unique_ptr<QueryResult> ExecuteAndCommit(DuckLakeSnapshot snapshot, const DuckLakeBatch &batch,
 	                                         bool &commit_sent) override;
 	unique_ptr<QueryResult> ExecuteDropInTransaction(string &query) override;
+	using DuckLakeMetadataManager::Query;
+	unique_ptr<QueryResult> Query(const DuckLakeStatement &query) override;
 
 	void ClearCache() override;
 	//! postgres_scanner looks up a table it has not cached

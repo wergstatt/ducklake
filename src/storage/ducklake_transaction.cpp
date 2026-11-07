@@ -909,6 +909,13 @@ void DuckLakeTransaction::Commit() {
 			FlushChanges();
 		} else if (connection) {
 			try {
+				// the files that the transaction cleaned up leave the schedule with its COMMIT
+				auto cleaned_up = RemoveCleanedUpFilesSql();
+				if (!cleaned_up.empty()) {
+					bool commit_sent = false;
+					auto result = metadata_manager->ExecuteAndCommit(DuckLakeSnapshot(), cleaned_up, commit_sent);
+					result->ThrowIfError("Failed to delete scheduled cleanup files in DuckLake: ");
+				}
 				connection->Commit();
 			} catch (std::exception &ex) {
 				ErrorData error(ex);
@@ -1762,9 +1769,9 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 	};
 	context.rewrite_before_retry = [&]() {
 		RewriteConfigOptions();
-		if (!cleaned_up_files.empty()) {
-			metadata_manager->RemoveFilesScheduledForCleanup(cleaned_up_files);
-		}
+	};
+	context.remove_cleaned_up_files = [&]() {
+		return RemoveCleanedUpFilesSql();
 	};
 	context.query_metadata = [&](string q) {
 		return metadata_manager->Query(q);
@@ -2326,16 +2333,21 @@ vector<DuckLakeSnapshotInfo> DuckLakeTransaction::ExpireSnapshotsNow(const strin
 
 void DuckLakeTransaction::RemoveFilesScheduledForCleanup(const vector<DuckLakeFileForCleanup> &files) {
 	auto &metadata_manager = GetMetadataManager();
-	metadata_manager.RemoveFilesScheduledForCleanup(files);
-	MarkMetadataWritten();
+	if (metadata_manager.CommitsEachStatement()) {
+		metadata_manager.RemoveFilesScheduledForCleanup(files);
+		return;
+	}
 	if (snapshots_expired) {
 		removed_files_after_expiry = true;
 	}
-	if (!metadata_manager.CommitsEachStatement()) {
-		// a retried commit removes them from the schedule again
-		lock_guard<mutex> guard(maintenance_lock);
-		cleaned_up_files.insert(cleaned_up_files.end(), files.begin(), files.end());
-	}
+	// the commit removes them from the schedule, also when it is retried
+	lock_guard<mutex> guard(maintenance_lock);
+	cleaned_up_files.insert(cleaned_up_files.end(), files.begin(), files.end());
+}
+
+DuckLakeBatch DuckLakeTransaction::RemoveCleanedUpFilesSql() {
+	lock_guard<mutex> guard(maintenance_lock);
+	return DuckLakeMetadataManager::RemoveFilesScheduledForCleanupSql(cleaned_up_files);
 }
 
 bool DuckLakeTransaction::ExpiredSnapshotsInMetadataTransaction() {

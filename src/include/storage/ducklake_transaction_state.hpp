@@ -85,6 +85,10 @@ struct DuckLakeCommitContext {
 	//! Writes again what the transaction wrote to the metadata before its commit, in a retried attempt.
 	std::function<void()> rewrite_before_retry = []() {
 	};
+	//! The deletes of the files that the transaction cleaned up from the deletion schedule, which each attempt sends.
+	std::function<DuckLakeBatch()> remove_cleaned_up_files = []() {
+		return DuckLakeBatch();
+	};
 	//! Whether the failed attempt ends the commit, also when another attempt could succeed.
 	std::function<bool()> skip_retry = []() {
 		return false;

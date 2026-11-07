@@ -2833,7 +2833,8 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 			// a commit of options alone, or of an expiry with nothing left to expire, writes no snapshot
 			wrote_snapshot = context.write_snapshot &&
 			                 (!expired_snapshots.empty() || !expiry.tags.empty() || !context.only_expires_snapshots);
-			if (!wrote_snapshot && !context.locks_config_options) {
+			auto cleaned_up_files = context.remove_cleaned_up_files();
+			if (!wrote_snapshot && !context.locks_config_options && cleaned_up_files.empty()) {
 				commit_sent = true;
 				context.commit_connection();
 				break;
@@ -2861,6 +2862,7 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 				batch_queries = DuckLakeMetadataManager::InsertSnapshotSql(commit_snapshot);
 				batch_queries += std::move(changes);
 			}
+			batch_queries += std::move(cleaned_up_files);
 			// where nothing runs after the batch, it can carry the COMMIT of the metadata transaction
 			auto res = context.execute_commit_batch(commit_snapshot, batch_queries,
 			                                        expired_snapshots.empty() ? &commit_sent : nullptr);

@@ -403,6 +403,8 @@ private:
 	//! Writes the options of the transaction again, after a failed commit attempt rolled them back
 	void RewriteConfigOptions();
 	void ClearMaintenanceChanges();
+	//! The deletes of the files that the transaction cleaned up from the schedule, which its commit sends
+	DuckLakeBatch RemoveCleanedUpFilesSql();
 	static DuckLakePartitionInfo GetNewPartitionKey(DuckLakeCommitState &commit_state, DuckLakeTableEntry &table);
 	static DuckLakeSortInfo GetNewSortKey(DuckLakeCommitState &commit_state, DuckLakeTableEntry &table);
 	static DuckLakeTableInfo GetNewTable(DuckLakeCommitState &commit_state, DuckLakeTableEntry &table);
@@ -501,7 +503,7 @@ private:
 	mutex maintenance_lock;
 	//! Whether the metadata transaction expired snapshots
 	bool expired_in_metadata_transaction = false;
-	//! The files the metadata transaction removed from the deletion schedule
+	//! The files that the commit removes from the deletion schedule
 	vector<DuckLakeFileForCleanup> cleaned_up_files;
 
 	atomic<idx_t> catalog_version;

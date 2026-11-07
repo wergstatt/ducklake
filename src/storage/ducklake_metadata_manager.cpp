@@ -3309,6 +3309,10 @@ unique_ptr<QueryResult> DuckLakeMetadataManager::Query(string &query) {
 	return transaction.ExecuteRaw(query);
 }
 
+unique_ptr<QueryResult> DuckLakeMetadataManager::Query(const DuckLakeStatement &query) {
+	return Query(query.ToSQL());
+}
+
 unique_ptr<QueryResult> DuckLakeMetadataManager::Execute(string &&query) {
 	return Execute(query);
 }
@@ -5689,11 +5693,13 @@ vector<DuckLakeSnapshotInfo> DuckLakeMetadataManager::GetAllSnapshots(const stri
 	return snapshots;
 }
 
-vector<DuckLakeFileForCleanup> DuckLakeMetadataManager::GetOldFilesForCleanup(const string &filter) {
-	auto query = R"(
+vector<DuckLakeFileForCleanup> DuckLakeMetadataManager::GetOldFilesForCleanup(const DuckLakeStatement &filter) {
+	DuckLakeStatement query {R"(
 SELECT data_file_id, path, path_is_relative, schedule_start
 FROM {METADATA_CATALOG}.ducklake_files_scheduled_for_deletion
-)" + filter;
+)",
+	                         {}};
+	query.Append(filter);
 	auto res = Query(query);
 	res->ThrowIfError("Failed to get files scheduled for deletion from DuckLake: ");
 	auto context = transaction.context.lock();
@@ -5801,12 +5807,14 @@ WHERE (suffix(filename, '.parquet') OR suffix(filename, '.puffin'))
 	return result;
 }
 
-vector<DuckLakeFileForCleanup> DuckLakeMetadataManager::GetFilesForCleanup(const string &filter, CleanupType type) {
+vector<DuckLakeFileForCleanup> DuckLakeMetadataManager::GetFilesForCleanup(const DuckLakeStatement &filter,
+                                                                           CleanupType type) {
 	switch (type) {
 	case CleanupType::OLD_FILES:
 		return GetOldFilesForCleanup(filter);
 	case CleanupType::ORPHANED_FILES:
-		return GetOrphanFilesForCleanup(filter);
+		// the listing of the files runs in DuckDB, not on the catalog
+		return GetOrphanFilesForCleanup(filter.ToSQL());
 	default:
 		throw InternalException("CleanupType in DuckLakeMetadataManager::GetFilesForCleanup is not valid");
 	}
@@ -5825,6 +5833,17 @@ WHERE data_file_id IN (%s);
 )",
 	                                         deleted_file_ids));
 	result->ThrowIfError("Failed to delete scheduled cleanup files in DuckLake: ");
+}
+
+DuckLakeBatch
+DuckLakeMetadataManager::RemoveFilesScheduledForCleanupSql(const vector<DuckLakeFileForCleanup> &cleaned_up_files) {
+	vector<DataFileIndex> file_ids;
+	for (auto &file : cleaned_up_files) {
+		file_ids.push_back(file.id);
+	}
+	return ChunkValuesBatch(
+	    {"DELETE FROM {METADATA_CATALOG}.ducklake_files_scheduled_for_deletion\nWHERE data_file_id IN (", {}},
+	    IdParameters(file_ids), {");", {}});
 }
 
 idx_t DuckLakeMetadataManager::GetNextColumnId(TableIndex table_id) {

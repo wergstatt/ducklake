@@ -631,6 +631,13 @@ unique_ptr<QueryResult> PostgresMetadataManager::ExecuteDropInTransaction(string
 	return ExecuteInTransaction(batch);
 }
 
+unique_ptr<QueryResult> PostgresMetadataManager::Query(const DuckLakeStatement &query) {
+	auto sql = query.sql;
+	SubstituteCatalogPlaceholders(sql);
+	// as those of the commit, the values stay out of the text of the read, and so out of its log
+	return transaction.ExecuteRaw(sql, query.params, sql);
+}
+
 void PostgresMetadataManager::ClearCache() {
 	// clear the cache of the metadata catalog alone, a global clear breaks queries running in other Postgres catalogs
 	auto &catalog = transaction.GetCatalog();

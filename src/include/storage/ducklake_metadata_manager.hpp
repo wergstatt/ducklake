@@ -340,6 +340,8 @@ public:
 
 	virtual unique_ptr<QueryResult> Query(DuckLakeSnapshot snapshot, string &query);
 	virtual unique_ptr<QueryResult> Query(string &query);
+	//! Runs a read whose text refers to its values as $1, $2, ...
+	virtual unique_ptr<QueryResult> Query(const DuckLakeStatement &query);
 
 	//! Rvalue sugar so call sites can pass `R"(...)"` and `StringUtil::Format(...)` directly.
 	//! Named-rvalue decays to an lvalue inside, so the virtual dispatch still picks up the
@@ -439,11 +441,13 @@ public:
 	//! The inserts of the given rows, which refer to their values as $1, $2, ..., in the batches of InsertValuesSql
 	static DuckLakeBatch InsertValuesBatch(const string &table_name, const vector<DuckLakeStatement> &values);
 	identifier_set_t GetInlinedTableNames(TableIndex table_id);
-	virtual vector<DuckLakeFileForCleanup> GetOldFilesForCleanup(const string &filter);
+	virtual vector<DuckLakeFileForCleanup> GetOldFilesForCleanup(const DuckLakeStatement &filter);
 	virtual vector<DuckLakeFileForCleanup> GetOrphanFilesForCleanup(const string &filter);
-	virtual vector<DuckLakeFileForCleanup> GetFilesForCleanup(const string &filter, CleanupType type);
+	virtual vector<DuckLakeFileForCleanup> GetFilesForCleanup(const DuckLakeStatement &filter, CleanupType type);
 
 	virtual void RemoveFilesScheduledForCleanup(const vector<DuckLakeFileForCleanup> &cleaned_up_files);
+	//! The deletes of the cleaned-up files from the schedule, for the batch that commits the cleanup
+	static DuckLakeBatch RemoveFilesScheduledForCleanupSql(const vector<DuckLakeFileForCleanup> &cleaned_up_files);
 	static string DropSchemas(const set<SchemaIndex> &ids);
 	static string DropTables(const set<TableIndex> &ids, bool renamed);
 	static string DropViews(const set<TableIndex> &ids, bool renamed, bool drop_view_column_tags = false);
