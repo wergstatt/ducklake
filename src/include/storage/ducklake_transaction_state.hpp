@@ -73,6 +73,9 @@ struct DuckLakeCommitContext {
 	//! Resets per-attempt state before a retry.
 	std::function<void()> prepare_retry = []() {
 	};
+	//! Keeps the latest snapshot that the conflict check of a retry read, so that the retry does not read it again.
+	std::function<void(DuckLakeSnapshot)> set_retry_snapshot = [](DuckLakeSnapshot) {
+	};
 	//! Throws when a failed attempt of the transaction cannot be retried.
 	std::function<void()> verify_retry = []() {
 	};

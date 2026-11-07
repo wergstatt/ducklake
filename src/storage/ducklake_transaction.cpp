@@ -1745,6 +1745,10 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 		connection->BeginTransaction();
 		snapshot.reset();
 	};
+	context.set_retry_snapshot = [&](DuckLakeSnapshot retry_snapshot) {
+		lock_guard<mutex> guard(snapshot_lock);
+		snapshot = make_uniq<DuckLakeSnapshot>(retry_snapshot);
+	};
 	context.verify_retry = [&]() {
 		if (ExpiredSnapshotsInMetadataTransaction() && !ExpiresSnapshotsOnCommit()) {
 			// the rollback of the failed attempt undid the expiry, which only a catalog with snapshot tags repeats

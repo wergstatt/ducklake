@@ -2807,6 +2807,9 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 				// a retry, or a commit of catalog-wide names, checks for conflicts first
 				commit_stats_snapshot = CheckForConflicts(transaction_snapshot, attempt_changes, context);
 				stats = &commit_stats_snapshot.stats;
+				if (i > 0) {
+					context.set_retry_snapshot(commit_snapshot);
+				}
 			} else {
 				commit_stats_snapshot.snapshot = context.get_snapshot();
 			}
