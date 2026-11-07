@@ -29,7 +29,7 @@ public:
 		return false;
 	}
 	bool ShowsConcurrentCommits() const override;
-	bool InsertsInlinedRowsAfterBatch(idx_t row_count) const override;
+	bool InsertsInlinedRowsAfterBatch(idx_t row_count, idx_t column_count) const override;
 	idx_t MaxIdentifierLength() const override {
 		return 63;
 	}
@@ -49,7 +49,10 @@ public:
 	string ConfigOptionLockSql() const override;
 
 	unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, string &query) override;
+	unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, const DuckLakeBatch &batch) override;
 	unique_ptr<QueryResult> ExecuteDropInTransaction(string &query) override;
+	using DuckLakeMetadataManager::Query;
+	vector<unique_ptr<QueryResult>> Query(DuckLakeSnapshot snapshot, const DuckLakeReadBatch &batch) override;
 
 	void ClearCache() override;
 	//! postgres_scanner looks up a table it has not cached
@@ -75,9 +78,14 @@ protected:
 private:
 	//! Where the server error starts in the error of the last Execute
 	optional_idx BatchServerErrorStart(const string &message) const;
+	//! Runs statements in one round trip, with their values as parameters, keeping the results of reads if asked
+	unique_ptr<QueryResult> ExecutePipeline(DuckLakeSnapshot snapshot, const vector<DuckLakeStatement> &batch,
+	                                        bool keep_results = false);
+	//! Runs the reads in one round trip, and returns a query that scans the kept result of each
+	vector<string> KeepResults(DuckLakeSnapshot snapshot, const DuckLakeReadBatch &batch);
 
-	//! The size of the last query of Execute, which the scanner repeats in front of a server error
-	idx_t executed_query_size = 0;
+	//! The queries of the last Execute, one of which the scanner repeats in front of a server error
+	vector<string> executed_queries;
 };
 
 } // namespace duckdb

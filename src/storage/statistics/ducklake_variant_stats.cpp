@@ -61,7 +61,10 @@ void DuckLakeColumnVariantStats::Serialize(DuckLakeColumnStatsInfo &column_stats
 		    DuckLakeColumnStatsInfo::FromColumnStats(column_stats.column_id, entry.second.field_stats);
 		column_stats.variant_stats.push_back(std::move(shredded_stats));
 	}
-	TrySerialize(column_stats.extra_stats);
+	string extra_stats;
+	if (TrySerialize(extra_stats)) {
+		column_stats.extra_stats = Value(extra_stats);
+	}
 }
 
 static bool TryGetCount(const JSONValue &obj, const string &key, idx_t &result) {
@@ -188,7 +191,7 @@ bool DuckLakeColumnVariantStats::TrySerialize(string &result) const {
 		root.Append(SerializeShreddedStats(writer, entry.first, entry.second));
 	}
 	writer.SetRoot(root);
-	result = SQLString::ToString(writer.ToString());
+	result = writer.ToString();
 	return true;
 }
 

@@ -207,6 +207,8 @@ public:
 	DuckLakeSnapshotCommit &GetCommitInfo();
 	//! Execute SQL on the metadata connection without placeholder substitution or metadata-manager wrapping.
 	unique_ptr<QueryResult> ExecuteRaw(string query);
+	//! As above, with values for the parameters of the query, logged as the given text
+	unique_ptr<QueryResult> ExecuteRaw(const string &query, vector<Value> parameters, const string &logged_query);
 	//! Execute a statement on the metadata connection, logged with its query text like ExecuteRaw.
 	unique_ptr<QueryResult> ExecuteStatement(unique_ptr<SQLStatement> statement);
 	Connection &GetConnection();

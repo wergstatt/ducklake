@@ -1,5 +1,6 @@
 #include "storage/ducklake_statement.hpp"
 
+#include "duckdb/common/sql_identifier.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/parser/parser.hpp"
 
@@ -42,7 +43,12 @@ string DuckLakeStatement::ToSQL() const {
 			throw InternalException("DuckLake statement refers to parameter $%d of %d", parameter, params.size());
 		}
 		auto &value = params[parameter - 1];
-		return value.IsNull() ? string("NULL") : value.ToSQLString();
+		if (value.IsNull()) {
+			return string("NULL");
+		}
+		// text keeps its NUL bytes, which a catalog that cannot store them rejects
+		return value.type().id() == LogicalTypeId::VARCHAR ? SQLString::ToString(StringValue::Get(value))
+		                                                   : value.ToSQLString();
 	});
 }
 
@@ -67,6 +73,41 @@ string DuckLakeBatch::ToSQL() const {
 	string result;
 	for (auto &statement : statements) {
 		result += statement.ToSQL();
+	}
+	return result;
+}
+
+//! The statements of a text, without their semicolons
+static vector<string> SplitAtSemicolons(const string &sql) {
+	vector<string> result;
+	idx_t start = 0;
+	auto add_until = [&](idx_t end) {
+		auto statement = sql.substr(start, end - start);
+		StringUtil::Trim(statement);
+		if (!statement.empty()) {
+			result.push_back(std::move(statement));
+		}
+	};
+	for (auto &token : Parser::Tokenize(sql)) {
+		if (token.type == SimplifiedTokenType::SIMPLIFIED_TOKEN_OPERATOR && sql[token.start] == ';') {
+			add_until(token.start);
+			start = token.start + 1;
+		}
+	}
+	add_until(sql.size());
+	return result;
+}
+
+vector<DuckLakeStatement> DuckLakeBatch::SplitStatements() const {
+	vector<DuckLakeStatement> result;
+	for (auto &statement : statements) {
+		auto texts = SplitAtSemicolons(statement.sql);
+		if (!statement.params.empty() && texts.size() != 1) {
+			throw InternalException("DuckLake statement with values holds %d statements", texts.size());
+		}
+		for (auto &text : texts) {
+			result.push_back({std::move(text), statement.params});
+		}
 	}
 	return result;
 }

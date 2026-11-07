@@ -245,8 +245,7 @@ string DuckLakeStagedCommit::EmitColumnStatsValues(const DuckLakeColumnStats &s)
 	if (s.extra_stats) {
 		string serialized;
 		if (s.extra_stats->TrySerialize(serialized) && !serialized.empty()) {
-			// TrySerialize already returns a ready-to-emit SQL literal; emit it as-is.
-			extra_stats = serialized;
+			extra_stats = SQLString::ToString(serialized);
 		}
 	}
 	return StringUtil::Format(

@@ -105,14 +105,14 @@ struct DuckLakeCommitContext {
 	    };
 	//! Emits the SQL that appends inlined data for the given table changes (handles new inlined-table creation,
 	//! per-tx cache, and the per-row INSERT VALUES).
-	std::function<string(DuckLakeSnapshot &, const vector<DuckLakeInlinedDataInfo> &, const vector<DuckLakeTableInfo> &,
-	                     const vector<DuckLakeTableInfo> &)>
+	std::function<DuckLakeBatch(DuckLakeSnapshot &, const vector<DuckLakeInlinedDataInfo> &,
+	                            const vector<DuckLakeTableInfo> &, const vector<DuckLakeTableInfo> &)>
 	    write_inlined_data;
 	//! Emits the SQL that creates+populates per-table inlined file-deletion tables (ducklake_inlined_delete_<id>)
 	//! and marks the metadata-manager cache for clearing when a new such table is created.
-	std::function<string(const vector<DuckLakeInlinedFileDeletionInfo> &)> write_inlined_file_deletes =
-	    [](const vector<DuckLakeInlinedFileDeletionInfo> &) {
-		    return string();
+	std::function<DuckLakeBatch(const vector<DuckLakeInlinedFileDeletionInfo> &, idx_t snapshot_id)>
+	    write_inlined_file_deletes = [](const vector<DuckLakeInlinedFileDeletionInfo> &, idx_t) {
+		    return DuckLakeBatch();
 	    };
 	//! Whether an earlier commit found values of a column at the snapshot
 	std::function<bool(TableIndex, FieldIndex, idx_t)> column_holds_values = [](TableIndex, FieldIndex, idx_t) {
@@ -214,8 +214,8 @@ public:
 	static SnapshotDeletedFromFiles
 	GetFilesDeletedOrDroppedAfterSnapshot(const std::function<unique_ptr<QueryResult>(string)> &executor);
 
-	string WriteSnapshotChanges(DuckLakeCommitState &commit_state, TransactionChangeInformation &changes,
-	                            const DuckLakeSnapshotCommit &commit_info) const;
+	DuckLakeStatement WriteSnapshotChanges(DuckLakeCommitState &commit_state, TransactionChangeInformation &changes,
+	                                       const DuckLakeSnapshotCommit &commit_info) const;
 
 	DuckLakeBatch CommitChanges(DuckLakeCommitState &commit_state, TransactionChangeInformation &transaction_changes,
 	                            optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats,
@@ -245,16 +245,16 @@ public:
 	//! Decrement table-level stats for files dropped this commit; returns true if live rows remain.
 	bool ApplyDroppedFileStats(TableIndex table_id, DuckLakeNewGlobalStats &new_stats,
 	                           map<TableIndex, DroppedDataFileStats> &attempt_dropped_file_stats);
-	string UpdateStatsForDroppedFiles(optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats,
-	                                  const DuckLakeCommitContext &context,
-	                                  map<TableIndex, DroppedDataFileStats> &attempt_dropped_file_stats);
+	DuckLakeBatch UpdateStatsForDroppedFiles(optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats,
+	                                         const DuckLakeCommitContext &context,
+	                                         map<TableIndex, DroppedDataFileStats> &attempt_dropped_file_stats);
 	//! The committed statistics of a table with those of the fields this commit adds
 	void InitializeGlobalStats(TableIndex table_id, const DuckLakeTableStats &current_stats,
 	                           DuckLakeNewGlobalStats &new_globals) const;
 	//! Writes the statistics of the older rows for the fields this commit adds
-	string WriteAddedFieldStats(const vector<DuckLakeAddedFields> &added_fields,
-	                            optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats,
-	                            const DuckLakeCommitContext &context);
+	DuckLakeBatch WriteAddedFieldStats(const vector<DuckLakeAddedFields> &added_fields,
+	                                   optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats,
+	                                   const DuckLakeCommitContext &context);
 	CompactionInformation GetCompactionChanges(DuckLakeCommitState &commit_state, CompactionType type);
 	//! After a REWRITE_DELETES compaction, recompute EXACT global stats for `table_id` from the post-rewrite file set
 	//! (+ committed inlined data) and append the UpdateGlobalTableStats SQL to `batch_query`. No-op (leaving the
