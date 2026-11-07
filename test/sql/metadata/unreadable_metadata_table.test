@@ -13,7 +13,7 @@ statement ok
 ATTACH '{TEST_DIR}/unreadable_metadata_probe.db' AS meta
 
 statement ok
-CREATE VIEW meta.ducklake_metadata AS SELECT 'version' AS key, '1.0' AS value FROM range(1) WHERE error('broken metadata') IS NULL
+CREATE VIEW meta.ducklake_metadata AS SELECT 'version' AS key, '1.0' AS value, NULL AS scope, NULL AS scope_id FROM range(1) WHERE error('broken metadata') IS NULL
 
 statement ok
 DETACH meta

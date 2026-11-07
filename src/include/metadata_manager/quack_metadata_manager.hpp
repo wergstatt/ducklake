@@ -42,6 +42,8 @@ public:
 	void ClearCache() override;
 
 	bool MetadataExists() override;
+	//! The server runs the read, so a missing metadata table is probed for first
+	unique_ptr<DuckLakeMetadata> TryLoadDuckLake() override;
 	bool InlinedDeletionTableExists(const Identifier &table_name) override;
 
 protected:

@@ -824,12 +824,28 @@ void DuckLakeMetadataManager::RenameInlinedColumnsByCopy(
 }
 
 DuckLakeMetadata DuckLakeMetadataManager::LoadDuckLake() {
+	auto metadata = TryLoadDuckLake();
+	if (!metadata) {
+		throw IOException("Failed to load existing DuckLake: the metadata catalog has no ducklake_metadata table");
+	}
+	return std::move(*metadata);
+}
+
+unique_ptr<DuckLakeMetadata> DuckLakeMetadataManager::TryLoadDuckLake() {
 	auto result = Query(R"(
 SELECT key, value, scope, scope_id FROM {METADATA_CATALOG}.ducklake_metadata
 )");
 	if (result->HasError()) {
+		auto &error_obj = result->GetErrorObject();
+		if (error_obj.Type() == ExceptionType::CATALOG) {
+			// Catalog/schema/table missing means we are attaching a fresh DuckLake.
+			return nullptr;
+		}
+		if (error_obj.Type() != ExceptionType::BINDER) {
+			error_obj.Throw("Failed to probe DuckLake metadata: ");
+		}
 		// preserve the original error in case the fallback also fails
-		auto original_error = result->GetErrorObject().RawMessage();
+		auto original_error = error_obj.RawMessage();
 		// we might be loading from a v0.1 database - if so we don't have scope yet
 		result = Query(R"(
 SELECT key, value FROM {METADATA_CATALOG}.ducklake_metadata
@@ -839,7 +855,7 @@ SELECT key, value FROM {METADATA_CATALOG}.ducklake_metadata
 			throw IOException("Failed to load existing DuckLake: %s\nFollowed by: %s", original_error, fallback_error);
 		}
 	}
-	DuckLakeMetadata metadata;
+	auto metadata = make_uniq<DuckLakeMetadata>();
 	for (auto &row : *result) {
 		DuckLakeTag tag;
 		tag.key = row.GetValue<string>(0);
@@ -847,7 +863,7 @@ SELECT key, value FROM {METADATA_CATALOG}.ducklake_metadata
 		if (result->ColumnCount() == 2 || row.IsNull(2)) {
 			// scope is NULL: global tag
 			// global tag
-			metadata.tags.push_back(std::move(tag));
+			metadata->tags.push_back(std::move(tag));
 			continue;
 		}
 		auto scope = row.GetValue<string>(2);
@@ -856,7 +872,7 @@ SELECT key, value FROM {METADATA_CATALOG}.ducklake_metadata
 			DuckLakeSchemaSetting schema_setting;
 			schema_setting.schema_id = SchemaIndex(row.GetValue<idx_t>(3));
 			schema_setting.tag = std::move(tag);
-			metadata.schema_settings.push_back(std::move(schema_setting));
+			metadata->schema_settings.push_back(std::move(schema_setting));
 			continue;
 		}
 		if (scope == "table") {
@@ -864,7 +880,7 @@ SELECT key, value FROM {METADATA_CATALOG}.ducklake_metadata
 			DuckLakeTableSetting table_setting;
 			table_setting.table_id = TableIndex(row.GetValue<idx_t>(3));
 			table_setting.tag = std::move(tag);
-			metadata.table_settings.push_back(std::move(table_setting));
+			metadata->table_settings.push_back(std::move(table_setting));
 			continue;
 		}
 		throw InvalidInputException("Unsupported setting scope %s - only schema/table are supported", scope);
