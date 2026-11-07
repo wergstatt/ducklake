@@ -35,6 +35,7 @@
 #include "functions/ducklake_compaction_functions.hpp"
 #include "storage/ducklake_sort_data.hpp"
 #include "common/parquet_file_scanner.hpp"
+#include "storage/ducklake_inlined_data_reader.hpp"
 
 namespace duckdb {
 
@@ -58,10 +59,11 @@ static void AttachDeleteFilesToWrittenFiles(vector<DuckLakeDeleteFile> &delete_f
 //===--------------------------------------------------------------------===//
 DuckLakeFlushData::DuckLakeFlushData(PhysicalPlan &physical_plan, const vector<LogicalType> &types,
                                      DuckLakeTableEntry &table, DuckLakeInlinedTableInfo inlined_table_p,
-                                     string encryption_key_p, optional_idx partition_id, PhysicalOperator &child)
+                                     shared_ptr<DuckLakeCommittedInlinedRows> inlined_rows_p, string encryption_key_p,
+                                     optional_idx partition_id, PhysicalOperator &child)
     : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, types, 0), table(table),
-      inlined_table(std::move(inlined_table_p)), encryption_key(std::move(encryption_key_p)),
-      partition_id(partition_id) {
+      inlined_table(std::move(inlined_table_p)), inlined_rows(std::move(inlined_rows_p)),
+      encryption_key(std::move(encryption_key_p)), partition_id(partition_id) {
 	children.push_back(child);
 }
 
@@ -99,6 +101,25 @@ SinkResultType DuckLakeFlushData::Sink(ExecutionContext &context, DataChunk &chu
 // Finalize
 //===--------------------------------------------------------------------===//
 using DeletesPerFile = unordered_map<string, set<PositionWithSnapshot>>;
+//! End snapshots of the deleted row versions, keyed by row id and begin snapshot
+static DuckLakeDeletedRowVersions GetDeletedRowVersions(const DuckLakeCommittedInlinedRows &inlined_rows) {
+	// the flushed rows start with their row id and begin snapshot, and end with their end snapshot
+	auto &rows = *inlined_rows.rows->data;
+	auto end_snapshot_column = rows.ColumnCount() - 1;
+	DuckLakeDeletedRowVersions deleted_rows;
+	for (auto &chunk : rows.Chunks()) {
+		auto row_ids = chunk.data[0].Values<int64_t>();
+		auto begin_snapshots = chunk.data[1].Values<int64_t>();
+		auto end_snapshots = chunk.data[end_snapshot_column].Values<int64_t>();
+		for (idx_t i = 0; i < chunk.size(); i++) {
+			if (end_snapshots[i].IsValid()) {
+				deleted_rows.emplace(make_pair(row_ids[i].GetValue(), begin_snapshots[i].GetValue()),
+				                     end_snapshots[i].GetValue());
+			}
+		}
+	}
+	return deleted_rows;
+}
 //! Partitioned writes can reorder rows, so positions come from the written file
 static set<PositionWithSnapshot> GetWrittenFileDeletes(ClientContext &context, const DuckLakeTableEntry &table,
                                                        const DuckLakeDataFile &file, const string &encryption_key,
@@ -137,13 +158,12 @@ SinkFinalizeType DuckLakeFlushData::Finalize(Pipeline &pipeline, Event &event, C
                                              OperatorSinkFinalizeInput &input) const {
 	auto &global_state = input.global_state.Cast<DuckLakeInsertGlobalState>();
 	auto &transaction = DuckLakeTransaction::Get(context, global_state.table.catalog);
-	auto &metadata_manager = transaction.GetMetadataManager();
 	auto snapshot = transaction.GetSnapshot();
 
 	DuckLakeInsert::RemoveEmptyFiles(context, global_state);
 	if (!global_state.written_files.empty()) {
 		DeletesPerFile deletes_per_file;
-		auto deleted_rows = metadata_manager.GetDeletedInlinedRowVersions(table, inlined_table.table_name, snapshot);
+		auto deleted_rows = GetDeletedRowVersions(*inlined_rows);
 		if (!deleted_rows.empty()) {
 			for (auto &file : global_state.written_files) {
 				auto deletes = GetWrittenFileDeletes(context, table, file, encryption_key, deleted_rows);
@@ -200,22 +220,25 @@ string DuckLakeFlushData::GetName() const {
 class DuckLakeLogicalFlush : public LogicalExtensionOperator {
 public:
 	DuckLakeLogicalFlush(TableIndex table_index, DuckLakeTableEntry &table, DuckLakeInlinedTableInfo inlined_table_p,
-	                     string encryption_key_p, optional_idx partition_id_p)
+	                     shared_ptr<DuckLakeCommittedInlinedRows> inlined_rows_p, string encryption_key_p,
+	                     optional_idx partition_id_p)
 	    : table_index(table_index), table(table), inlined_table(std::move(inlined_table_p)),
-	      encryption_key(std::move(encryption_key_p)), partition_id(partition_id_p) {
+	      inlined_rows(std::move(inlined_rows_p)), encryption_key(std::move(encryption_key_p)),
+	      partition_id(partition_id_p) {
 	}
 
 	TableIndex table_index;
 	DuckLakeTableEntry &table;
 	DuckLakeInlinedTableInfo inlined_table;
+	shared_ptr<DuckLakeCommittedInlinedRows> inlined_rows;
 	string encryption_key;
 	optional_idx partition_id;
 
 public:
 	PhysicalOperator &CreatePlan(ClientContext &context, PhysicalPlanGenerator &planner) override {
 		auto &child = planner.CreatePlan(*children[0]);
-		return planner.Make<DuckLakeFlushData>(types, table, std::move(inlined_table), std::move(encryption_key),
-		                                       partition_id, child);
+		return planner.Make<DuckLakeFlushData>(types, table, std::move(inlined_table), std::move(inlined_rows),
+		                                       std::move(encryption_key), partition_id, child);
 	}
 
 	string GetName() const override {
@@ -298,12 +321,15 @@ unique_ptr<LogicalOperator> DuckLakeDataFlusher::GenerateFlushCommand() {
 
 	DuckLakeCopyInput copy_input(context, table);
 	unique_ptr<LogicalCopyToFile> copy;
+	shared_ptr<DuckLakeCommittedInlinedRows> inlined_rows;
 	auto root = DuckLakeCompactor::PlanRewriteScan(
 	    context, binder, table, copy_input, true,
 	    [&](DuckLakeFunctionInfo &read_info) {
 		    read_info.scan_type = DuckLakeScanType::SCAN_FOR_FLUSH;
 		    read_info.flush_sort_order_sql = sort_order_sql;
-		    return make_uniq<DuckLakeMultiFileList>(read_info, inlined_table);
+		    // the scan and the deletes of the written files share one read of the inlined table
+		    inlined_rows = DuckLakeInlinedDataReader::ReadRowsForFlush(read_info, inlined_table);
+		    return make_uniq<DuckLakeMultiFileList>(read_info, inlined_table, inlined_rows);
 	    },
 	    copy);
 
@@ -311,8 +337,9 @@ unique_ptr<LogicalOperator> DuckLakeDataFlusher::GenerateFlushCommand() {
 	copy->children.push_back(std::move(root));
 
 	// followed by the compaction operator (that writes the results back to the
-	auto compaction = make_uniq<DuckLakeLogicalFlush>(binder.GenerateTableIndex(), table, inlined_table,
-	                                                  std::move(copy_input.encryption_key), partition_id);
+	auto compaction =
+	    make_uniq<DuckLakeLogicalFlush>(binder.GenerateTableIndex(), table, inlined_table, std::move(inlined_rows),
+	                                    std::move(copy_input.encryption_key), partition_id);
 	compaction->children.push_back(std::move(copy));
 	return std::move(compaction);
 }

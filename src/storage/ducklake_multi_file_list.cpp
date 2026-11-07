@@ -47,9 +47,11 @@ static DuckLakeFileListEntry InlinedDataEntry(const DuckLakeInlinedTableInfo &in
 }
 
 DuckLakeMultiFileList::DuckLakeMultiFileList(DuckLakeFunctionInfo &read_info,
-                                             const DuckLakeInlinedTableInfo &inlined_table)
+                                             const DuckLakeInlinedTableInfo &inlined_table,
+                                             shared_ptr<DuckLakeCommittedInlinedRows> inlined_rows)
     : read_info(read_info), read_file_list(true) {
 	files.push_back(InlinedDataEntry(inlined_table));
+	files.back().inlined_rows = std::move(inlined_rows);
 	inlined_data_tables.push_back(inlined_table);
 }
 

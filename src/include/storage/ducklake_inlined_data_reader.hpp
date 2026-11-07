@@ -18,6 +18,7 @@ class DuckLakeFieldData;
 class DuckLakeMetadataManager;
 struct DuckLakeFunctionInfo;
 struct DuckLakeInlinedColNames;
+struct DuckLakeInlinedTableInfo;
 
 enum class InlinedVirtualColumn { NONE, COLUMN_ROW_ID, COLUMN_FILE_ROW_NUMBER, COLUMN_EMPTY };
 
@@ -48,6 +49,9 @@ public:
 	                                                                  const Identifier &table_name,
 	                                                                  const vector<MultiFileColumnDefinition> &columns,
 	                                                                  optional_idx &next_file_id);
+	//! Read the rows a flush writes, each followed by the end snapshot of its version
+	static shared_ptr<DuckLakeCommittedInlinedRows> ReadRowsForFlush(DuckLakeFunctionInfo &read_info,
+	                                                                 const DuckLakeInlinedTableInfo &inlined_table);
 
 private:
 	static void GetColumnToRead(const DuckLakeFunctionInfo &read_info, DuckLakeMetadataManager &metadata_manager,

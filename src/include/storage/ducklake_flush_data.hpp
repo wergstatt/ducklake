@@ -14,6 +14,7 @@
 #include "duckdb/common/index_vector.hpp"
 #include "storage/ducklake_stats.hpp"
 #include "storage/ducklake_metadata_info.hpp"
+#include "storage/ducklake_inlined_data.hpp"
 
 namespace duckdb {
 class DuckLakeTableEntry;
@@ -21,11 +22,13 @@ class DuckLakeTableEntry;
 class DuckLakeFlushData : public PhysicalOperator {
 public:
 	DuckLakeFlushData(PhysicalPlan &physical_plan, const vector<LogicalType> &types, DuckLakeTableEntry &table,
-	                  DuckLakeInlinedTableInfo inlined_table, string encryption_key, optional_idx partition_id,
-	                  PhysicalOperator &child);
+	                  DuckLakeInlinedTableInfo inlined_table, shared_ptr<DuckLakeCommittedInlinedRows> inlined_rows,
+	                  string encryption_key, optional_idx partition_id, PhysicalOperator &child);
 
 	DuckLakeTableEntry &table;
 	DuckLakeInlinedTableInfo inlined_table;
+	//! The rows of the inlined table that the flush writes, with their end snapshots
+	shared_ptr<DuckLakeCommittedInlinedRows> inlined_rows;
 	string encryption_key;
 	optional_idx partition_id;
 
