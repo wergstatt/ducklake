@@ -46,7 +46,7 @@ CALL disable_logging()
 
 # only the schema of the transaction snapshot may load, not the one of the latest snapshot
 query II
-SELECT count(*) > 0, count(*) FILTER (WHERE query LIKE '%ducklake_macro%') <= 1 FROM duckdb_logs_parsed('DuckLakeMetadata')
+SELECT count(*) > 0, count(*) FILTER (WHERE query LIKE '%macro_name%') <= 1 FROM duckdb_logs_parsed('DuckLakeMetadata')
 ----
 true	true
 

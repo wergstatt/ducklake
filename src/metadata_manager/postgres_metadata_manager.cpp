@@ -566,6 +566,46 @@ vector<string> PostgresMetadataManager::KeepResults(DuckLakeSnapshot snapshot, c
 	return scans;
 }
 
+DuckLakeCatalogInfo PostgresMetadataManager::GetCatalogForSnapshot(DuckLakeSnapshot snapshot) {
+	if (!ScannerFunction(*transaction.GetConnection().context, "postgres_pipeline_result")) {
+		return DuckLakeMetadataManager::GetCatalogForSnapshot(snapshot);
+	}
+	auto &ducklake_catalog = transaction.GetCatalog();
+	// the tables of the catalog are read as they are at the snapshot, the tables of their parts whole
+	vector<string> tables = {"ducklake_schema", "ducklake_table",          "ducklake_tag",
+	                         "ducklake_column", "ducklake_column_tag",     "ducklake_view",
+	                         "ducklake_macro",  "ducklake_partition_info", "ducklake_sort_info"};
+	if (ducklake_catalog.SupportsV1_1Metadata()) {
+		tables.emplace_back("ducklake_view_column_tag");
+	}
+	DuckLakeReadBatch reads;
+	for (auto &table : tables) {
+		reads.Add({"SELECT * FROM {METADATA_CATALOG}." + table +
+		               " WHERE $1 >= begin_snapshot AND ($1 < end_snapshot OR end_snapshot IS NULL)",
+		           {Value::UBIGINT(snapshot.snapshot_id)}});
+	}
+	for (string table : {"ducklake_inlined_data_tables", "ducklake_macro_impl", "ducklake_macro_parameters",
+	                     "ducklake_partition_column", "ducklake_sort_expression"}) {
+		reads.Add({"SELECT * FROM {METADATA_CATALOG}." + table});
+		tables.push_back(std::move(table));
+	}
+	// the queries of the catalog run on the results of the reads, each in place of its table
+	auto scans = KeepResults(snapshot, reads);
+	return BuildCatalogForSnapshot(
+	    snapshot,
+	    [&](DuckLakeSnapshot s, string query) {
+		    vector<string> results;
+		    for (idx_t i = 0; i < tables.size(); i++) {
+			    if (StringUtil::Contains(query, "{METADATA_CATALOG}." + tables[i])) {
+				    results.push_back(StringUtil::Format("%s AS (%s)", tables[i], scans[i]));
+			    }
+		    }
+		    query = StringUtil::Replace(query, "{METADATA_CATALOG}.", "");
+		    return DuckLakeMetadataManager::Query(s, "WITH " + StringUtil::Join(results, ", ") + query);
+	    },
+	    ducklake_catalog.DataPath(), ducklake_catalog.Separator(), ducklake_catalog.SupportsV1_1Metadata());
+}
+
 unique_ptr<QueryResult> PostgresMetadataManager::ExecutePipeline(DuckLakeSnapshot snapshot,
                                                                  const vector<DuckLakeStatement> &batch,
                                                                  bool keep_results) {

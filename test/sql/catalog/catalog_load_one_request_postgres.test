@@ -1,0 +1,45 @@
+# name: test/sql/catalog/catalog_load_one_request_postgres.test
+# description: on PostgreSQL the catalog is loaded with one plain read per metadata table, all in one request
+# group: [catalog]
+
+require ducklake
+
+require parquet
+
+require postgres_scanner
+
+require-env DUCKLAKE_CI
+
+require-env DUCKLAKE_CONNECTION
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/catalog_load_one_request_postgres')
+
+statement ok
+CREATE TABLE dl.t (i INTEGER)
+
+statement ok
+DETACH dl
+
+statement ok
+CALL enable_logging(['DuckLakeMetadata', 'PostgresQueryLog'], storage = 'memory')
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/catalog_load_one_request_postgres')
+
+query I
+SELECT column_name FROM (DESCRIBE dl.t)
+----
+i
+
+# the metadata tables are read in one pipeline, and none is scanned with a COPY of its own
+query I
+SELECT (SELECT count(*) = 1 AND bool_and(contains(query, 'ducklake_sort_expression'))
+        FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE contains(query, 'ducklake_column WHERE'))
+  AND (SELECT count(*) = 0 FROM duckdb_logs_parsed('PostgresQueryLog')
+       WHERE contains(query, 'COPY') AND contains(query, '"ducklake_column"'))
+  OR NOT EXISTS (SELECT 1 FROM duckdb_functions() WHERE function_name = 'postgres_pipeline_result')
+----
+true

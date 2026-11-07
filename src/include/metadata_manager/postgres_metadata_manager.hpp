@@ -53,6 +53,7 @@ public:
 	unique_ptr<QueryResult> ExecuteDropInTransaction(string &query) override;
 	using DuckLakeMetadataManager::Query;
 	vector<unique_ptr<QueryResult>> Query(DuckLakeSnapshot snapshot, const DuckLakeReadBatch &batch) override;
+	DuckLakeCatalogInfo GetCatalogForSnapshot(DuckLakeSnapshot snapshot) override;
 
 	void ClearCache() override;
 	//! postgres_scanner looks up a table it has not cached
