@@ -4017,7 +4017,8 @@ DuckLakeBatch DuckLakeMetadataManager::WriteNewInlinedData(
 		for (auto &type : entry.data->data->Types()) {
 			needs_encoding |= DuckLakeUtil::GetInlinedStorageType(*this, type) != type;
 		}
-		if (needs_encoding || InsertsInlinedRowsAfterBatch(entry.data->data->Count())) {
+		if (needs_encoding ||
+		    InsertsInlinedRowsAfterBatch(entry.data->data->Count(), entry.data->data->ColumnCount())) {
 			inlined_inserts.push_back(InlinedDataInsert(transaction, commit_snapshot, entry, inlined_table_name));
 			continue;
 		}

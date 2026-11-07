@@ -77,4 +77,39 @@ string DuckLakeBatch::ToSQL() const {
 	return result;
 }
 
+//! The statements of a text, without their semicolons
+static vector<string> SplitAtSemicolons(const string &sql) {
+	vector<string> result;
+	idx_t start = 0;
+	auto add_until = [&](idx_t end) {
+		auto statement = sql.substr(start, end - start);
+		StringUtil::Trim(statement);
+		if (!statement.empty()) {
+			result.push_back(std::move(statement));
+		}
+	};
+	for (auto &token : Parser::Tokenize(sql)) {
+		if (token.type == SimplifiedTokenType::SIMPLIFIED_TOKEN_OPERATOR && sql[token.start] == ';') {
+			add_until(token.start);
+			start = token.start + 1;
+		}
+	}
+	add_until(sql.size());
+	return result;
+}
+
+vector<DuckLakeStatement> DuckLakeBatch::SplitStatements() const {
+	vector<DuckLakeStatement> result;
+	for (auto &statement : statements) {
+		auto texts = SplitAtSemicolons(statement.sql);
+		if (!statement.params.empty() && texts.size() != 1) {
+			throw InternalException("DuckLake statement with values holds %d statements", texts.size());
+		}
+		for (auto &text : texts) {
+			result.push_back({std::move(text), statement.params});
+		}
+	}
+	return result;
+}
+
 } // namespace duckdb

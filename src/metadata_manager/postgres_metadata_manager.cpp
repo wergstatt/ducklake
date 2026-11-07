@@ -9,6 +9,7 @@
 #include "duckdb/common/type_visitor.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
 #include "duckdb/common/vector/struct_vector.hpp"
+#include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 
 namespace duckdb {
 
@@ -238,7 +239,18 @@ bool PostgresMetadataManager::ShowsConcurrentCommits() const {
 	       StringUtil::CIEquals(isolation_level->second.ToString(), "READ COMMITTED");
 }
 
-bool PostgresMetadataManager::InsertsInlinedRowsAfterBatch(idx_t row_count) const {
+//! The function of postgres_scanner that runs statements with their parameters in one round trip, if it has one
+static optional_ptr<CatalogEntry> PipelineFunction(ClientContext &context) {
+	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
+	auto &schema = Catalog::GetSystemCatalog(context).GetSchema(transaction, Identifier::DefaultSchema());
+	return schema.GetEntry(transaction, CatalogType::TABLE_FUNCTION_ENTRY, Identifier("postgres_execute_pipeline"));
+}
+
+bool PostgresMetadataManager::InsertsInlinedRowsAfterBatch(idx_t row_count, idx_t column_count) const {
+	// a pipeline sends the rows as parameters, their row ids, snapshots and cells, while they fit in one statement
+	if (PipelineFunction(*transaction.GetConnection().context)) {
+		return row_count * (column_count + 2) > MAX_PARAMETERS_PER_STATEMENT;
+	}
 	// the copy of a separate insert costs more round trips than parsing the VALUES text of a few rows
 	static constexpr idx_t MAX_INLINED_ROWS_IN_BATCH = 100;
 	return row_count > MAX_INLINED_ROWS_IN_BATCH;
@@ -359,16 +371,25 @@ string PostgresMetadataManager::GetColumnTypeInternal(const LogicalType &column_
 
 optional_idx PostgresMetadataManager::BatchServerErrorStart(const string &message) const {
 	// the batch and the server error can contain any text, so the batch is found by its size
-	const string failed_batch = "Failed to execute query \"";
-	auto batch_start = message.find(failed_batch);
+	// the scanner names a failed statement "query", or in a pipeline by its position, and then quotes it
+	const string failed_batch = "Failed to execute ";
+	auto failed_start = message.find(failed_batch);
+	if (failed_start == string::npos) {
+		return optional_idx();
+	}
+	auto batch_start = message.find('"', failed_start + failed_batch.size());
 	if (batch_start == string::npos) {
 		return optional_idx();
 	}
-	auto batch_end = batch_start + failed_batch.size() + executed_query_size;
-	if (batch_end + 3 > message.size() || message.compare(batch_end, 3, "\": ") != 0) {
-		return optional_idx();
+	batch_start++;
+	for (auto &query : executed_queries) {
+		auto batch_end = batch_start + query.size();
+		if (batch_end + 3 <= message.size() && message.compare(batch_start, query.size(), query) == 0 &&
+		    message.compare(batch_end, 3, "\": ") == 0) {
+			return batch_end;
+		}
 	}
-	return batch_end;
+	return optional_idx();
 }
 
 string PostgresMetadataManager::CommitErrorWithoutQuery(const string &message) const {
@@ -484,22 +505,62 @@ string PostgresMetadataManager::ConfigOptionLockSql() const {
 	return "UPDATE {METADATA_CATALOG}.ducklake_metadata SET value = value WHERE key = 'version' AND scope IS NULL;\n";
 }
 
+static void CheckNoNulByte(const string &text) {
+	if (text.find('\0') != string::npos) {
+		throw InvalidInputException("A DuckLake catalog on PostgreSQL cannot store text that contains a NUL byte, "
+		                            "such as a partition value, a name or a commit message");
+	}
+}
+
 unique_ptr<QueryResult> PostgresMetadataManager::Execute(DuckLakeSnapshot snapshot, string &query) {
 	SubstituteTransactionPlaceholders(snapshot, query);
 	auto &ducklake_catalog = transaction.GetCatalog();
 	SubstituteCatalogPlaceholders(query, SQLQuotedIdentifier::ToString(ducklake_catalog.MetadataSchemaName()));
-	if (query.find('\0') != string::npos) {
-		throw InvalidInputException("A DuckLake catalog on PostgreSQL cannot store text that contains a NUL byte, "
-		                            "such as a partition value, a name or a commit message");
-	}
+	CheckNoNulByte(query);
 	auto catalog_literal = SQLString::ToString(ducklake_catalog.MetadataDatabaseName().GetIdentifierName());
 	// casts of float bounds to text keep their exact value
 	query = "SET LOCAL extra_float_digits = 3;" + query;
 	// the scanner drops trailing semicolons before it repeats the query in an error
 	StringUtil::RTrim(query, "; \t\n\v\f\r");
-	executed_query_size = query.size();
+	executed_queries = {query};
 	return transaction.ExecuteRaw(
 	    StringUtil::Format("CALL postgres_execute(%s, %s, prepare=FALSE)", catalog_literal, SQLString(query)));
+}
+
+unique_ptr<QueryResult> PostgresMetadataManager::Execute(DuckLakeSnapshot snapshot, const DuckLakeBatch &batch) {
+	if (!PipelineFunction(*transaction.GetConnection().context)) {
+		return DuckLakeMetadataManager::Execute(snapshot, batch);
+	}
+	// casts of float bounds to text keep their exact value
+	DuckLakeBatch pipeline("SET LOCAL extra_float_digits = 3");
+	pipeline += batch;
+	return ExecutePipeline(snapshot, pipeline);
+}
+
+unique_ptr<QueryResult> PostgresMetadataManager::ExecutePipeline(DuckLakeSnapshot snapshot,
+                                                                 const DuckLakeBatch &batch) {
+	auto &ducklake_catalog = transaction.GetCatalog();
+	auto schema_identifier = SQLQuotedIdentifier::ToString(ducklake_catalog.MetadataSchemaName());
+	vector<Value> statements;
+	executed_queries.clear();
+	for (auto &statement : batch.SplitStatements()) {
+		auto query = statement.sql;
+		SubstituteTransactionPlaceholders(snapshot, query);
+		SubstituteCatalogPlaceholders(query, schema_identifier);
+		CheckNoNulByte(query);
+		vector<Value> params;
+		for (auto &param : statement.params) {
+			CheckNoNulByte(param.ToString());
+			params.push_back(param.DefaultCastAs(LogicalType::VARCHAR));
+		}
+		statements.push_back(
+		    Value::STRUCT({{"query", Value(query)}, {"params", Value::LIST(LogicalType::VARCHAR, std::move(params))}}));
+		executed_queries.push_back(std::move(query));
+	}
+	auto catalog_literal = SQLString::ToString(ducklake_catalog.MetadataDatabaseName().GetIdentifierName());
+	// the values stay out of the query, and so out of its logs
+	return transaction.ExecuteRaw(StringUtil::Format("FROM postgres_execute_pipeline(%s, $1)", catalog_literal),
+	                              {Value::LIST(std::move(statements))}, StringUtil::Join(executed_queries, ";\n"));
 }
 
 unique_ptr<QueryResult> PostgresMetadataManager::ExecuteDropInTransaction(string &query) {

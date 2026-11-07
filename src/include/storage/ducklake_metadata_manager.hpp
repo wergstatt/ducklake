@@ -230,7 +230,7 @@ public:
 	//! Whether transactions that started before a metadata table was dropped still read it
 	virtual bool DroppedTablesStayReadable() const;
 	//! Whether a commit inserts inlined rows after its batch instead of sending them as VALUES text in it
-	virtual bool InsertsInlinedRowsAfterBatch(idx_t row_count) const {
+	virtual bool InsertsInlinedRowsAfterBatch(idx_t row_count, idx_t column_count) const {
 		return !CommitsEachStatement();
 	}
 	//! Probe the metadata server for optional capabilities, for now we only check for server-side retries

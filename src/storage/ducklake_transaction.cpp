@@ -2370,6 +2370,17 @@ unique_ptr<QueryResult> DuckLakeTransaction::ExecuteRaw(string query) {
 	return std::move(result);
 }
 
+unique_ptr<QueryResult> DuckLakeTransaction::ExecuteRaw(const string &query, vector<Value> parameters,
+                                                        const string &logged_query) {
+	auto &connection = GetConnection();
+	auto start = std::chrono::steady_clock::now();
+	auto prepared = connection.Prepare(query);
+	auto result =
+	    prepared->HasError() ? make_uniq<QueryResult>(prepared->GetErrorObject()) : prepared->Execute(parameters);
+	ReportMetadataQuery(logged_query, std::chrono::steady_clock::now() - start);
+	return result;
+}
+
 unique_ptr<QueryResult> DuckLakeTransaction::ExecuteStatement(unique_ptr<SQLStatement> statement) {
 	auto &connection = GetConnection();
 	auto query = statement->query;

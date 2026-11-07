@@ -39,6 +39,8 @@ public:
 	}
 	//! The statements as one text, with each value written as a literal
 	string ToSQL() const;
+	//! The statements one by one, with a text that holds several split at its semicolons
+	vector<DuckLakeStatement> SplitStatements() const;
 
 private:
 	vector<DuckLakeStatement> statements;

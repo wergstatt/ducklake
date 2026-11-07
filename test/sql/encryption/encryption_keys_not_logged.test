@@ -1,0 +1,35 @@
+# name: test/sql/encryption/encryption_keys_not_logged.test
+# description: The encryption keys of new files stay out of the metadata log
+# group: [encryption]
+
+require ducklake
+
+require parquet
+
+require httpfs
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS lake (DATA_PATH '{DATA_PATH}/encryption_keys_not_logged', ENCRYPTED,
+  DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE lake.t (i INTEGER)
+
+statement ok
+CALL enable_logging('DuckLakeMetadata')
+
+statement ok
+INSERT INTO lake.t VALUES (1)
+
+# without postgres_execute_pipeline, a catalog on PostgreSQL sends the keys in the text of its statements
+query I
+SELECT count(*) = 0
+  OR NOT EXISTS (SELECT 1 FROM duckdb_functions() WHERE function_name = 'postgres_execute_pipeline')
+FROM duckdb_logs_parsed('DuckLakeMetadata'), __ducklake_metadata_lake.ducklake_data_file
+WHERE contains(query, encryption_key)
+----
+true

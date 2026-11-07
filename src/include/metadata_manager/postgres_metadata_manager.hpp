@@ -29,7 +29,7 @@ public:
 		return false;
 	}
 	bool ShowsConcurrentCommits() const override;
-	bool InsertsInlinedRowsAfterBatch(idx_t row_count) const override;
+	bool InsertsInlinedRowsAfterBatch(idx_t row_count, idx_t column_count) const override;
 	idx_t MaxIdentifierLength() const override {
 		return 63;
 	}
@@ -49,6 +49,7 @@ public:
 	string ConfigOptionLockSql() const override;
 
 	unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, string &query) override;
+	unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, const DuckLakeBatch &batch) override;
 	unique_ptr<QueryResult> ExecuteDropInTransaction(string &query) override;
 
 	void ClearCache() override;
@@ -75,9 +76,11 @@ protected:
 private:
 	//! Where the server error starts in the error of the last Execute
 	optional_idx BatchServerErrorStart(const string &message) const;
+	//! Runs the statements of a batch in one round trip, with their values as parameters
+	unique_ptr<QueryResult> ExecutePipeline(DuckLakeSnapshot snapshot, const DuckLakeBatch &batch);
 
-	//! The size of the last query of Execute, which the scanner repeats in front of a server error
-	idx_t executed_query_size = 0;
+	//! The queries of the last Execute, one of which the scanner repeats in front of a server error
+	vector<string> executed_queries;
 };
 
 } // namespace duckdb
