@@ -1082,9 +1082,12 @@ static set<FieldIndex> ReadSkippedStatsFields(TableIndex table_id, const DuckLak
 	return result;
 }
 
-bool DuckLakeTransactionState::RecomputeGlobalStatsAfterRewrite(
-    string &batch_query, TableIndex table_id, DuckLakeSnapshot snapshot, const CompactionInformation &rewrite_changes,
-    const set<DataFileIndex> &removed_source_ids, const DuckLakeCommitContext &context, bool &deleted_rows_remain) {
+bool DuckLakeTransactionState::RecomputeGlobalStatsAfterRewrite(DuckLakeBatch &batch_query, TableIndex table_id,
+                                                                DuckLakeSnapshot snapshot,
+                                                                const CompactionInformation &rewrite_changes,
+                                                                const set<DataFileIndex> &removed_source_ids,
+                                                                const DuckLakeCommitContext &context,
+                                                                bool &deleted_rows_remain) {
 	deleted_rows_remain = false;
 	if (tables_changed_by_others.find(table_id) != tables_changed_by_others.end()) {
 		return false; // the stats below are read at the transaction snapshot, which misses the other commits
@@ -1572,7 +1575,7 @@ void DuckLakeTransactionState::ResolveNullOnlyBounds(TableIndex table_id, const 
 }
 
 NewDataInfo DuckLakeTransactionState::GetNewDataFiles(
-    string &batch_query, DuckLakeCommitState &commit_state, optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats,
+    DuckLakeBatch &batch_query, DuckLakeCommitState &commit_state, optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats,
     const DuckLakeCommitContext &context, map<TableIndex, DroppedDataFileStats> &attempt_dropped_file_stats) {
 	NewDataInfo result;
 	unique_ptr<DuckLakeStats> dl_stats;
@@ -2213,11 +2216,10 @@ FROM {METADATA_CATALOG}.ducklake_column WHERE (table_id, column_id) IN (%s))",
 	return result;
 }
 
-string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state,
-                                               TransactionChangeInformation &transaction_changes,
-                                               optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats,
-                                               const DuckLakeCommitContext &context,
-                                               map<TableIndex, DroppedDataFileStats> &attempt_dropped_file_stats) {
+DuckLakeBatch DuckLakeTransactionState::CommitChanges(
+    DuckLakeCommitState &commit_state, TransactionChangeInformation &transaction_changes,
+    optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats, const DuckLakeCommitContext &context,
+    map<TableIndex, DroppedDataFileStats> &attempt_dropped_file_stats) {
 	committed_table_options.clear();
 	added_field_stats.clear();
 	refreshed_table_sizes.clear();
@@ -2226,7 +2228,7 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
 
 	EnsureCommitInfoProvided(commit_info);
 
-	string batch_queries;
+	DuckLakeBatch batch_queries;
 	// drop entries
 	if (!dropped_tables.empty()) {
 		batch_queries += DuckLakeMetadataManager::DropTables(dropped_tables, false);
@@ -2384,12 +2386,12 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
 
 	auto write_data_files_sql = [&](const vector<DuckLakeFileInfo> &files) {
 		if (files.empty()) {
-			return string();
+			return DuckLakeBatch();
 		}
 		if (context.try_append_data_files &&
 		    context.try_append_data_files(commit_snapshot, files, new_tables_result, new_schemas_result)) {
 			// fast-path: files were written directly via Appender, skip SQL emission
-			return string();
+			return DuckLakeBatch();
 		}
 		return DuckLakeMetadataManager::WriteNewDataFilesSqlBatch(
 		    files, table_relative_paths(files, &DuckLakeFileInfo::file_name), context.supports_v1_1_metadata);
@@ -2838,7 +2840,7 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 			}
 			context.set_delete_commit_snapshot(commit_snapshot.snapshot_id);
 			DuckLakeCommitState commit_state(commit_snapshot);
-			string batch_queries;
+			DuckLakeBatch batch_queries;
 			if (wrote_snapshot) {
 				// write the new snapshot
 				batch_queries = DuckLakeMetadataManager::InsertSnapshotSql();

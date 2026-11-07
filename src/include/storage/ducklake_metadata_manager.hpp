@@ -22,6 +22,7 @@
 #include "storage/ducklake_stats.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "storage/ducklake_metadata_info.hpp"
+#include "storage/ducklake_statement.hpp"
 #include "common/ducklake_encryption.hpp"
 #include "common/ducklake_options.hpp"
 #include "common/index.hpp"
@@ -315,6 +316,7 @@ public:
 	virtual DuckLakeMetadata LoadDuckLake();
 
 	virtual unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, string &query);
+	virtual unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, const DuckLakeBatch &batch);
 	virtual unique_ptr<QueryResult> Execute(string &query);
 	//! Runs the statements in a transaction of their own, rolled back when one of them fails
 	virtual unique_ptr<QueryResult> ExecuteInTransaction(string &query);
@@ -417,6 +419,8 @@ public:
 	static string InsertValuesSql(const string &table_name, const vector<string> &values);
 	//! The inserts of the given rows into the given table, in batches
 	static string InsertValuesIntoSql(const string &qualified_table_name, const vector<string> &values);
+	//! The inserts of the given rows, which refer to their values as $1, $2, ..., in the batches of InsertValuesSql
+	static DuckLakeBatch InsertValuesBatch(const string &table_name, const vector<DuckLakeStatement> &values);
 	identifier_set_t GetInlinedTableNames(TableIndex table_id);
 	virtual vector<DuckLakeFileForCleanup> GetOldFilesForCleanup(const string &filter);
 	virtual vector<DuckLakeFileForCleanup> GetOrphanFilesForCleanup(const string &filter);
@@ -469,8 +473,9 @@ public:
 	//! SQL that writes new data files, shared with the server-side commit path. Returns SQL with
 	//! {METADATA_CATALOG} / {SNAPSHOT_ID} placeholders. Caller supplies resolved paths (one per file,
 	//! same order) since path policy differs across callers (schema-relative vs. always-absolute).
-	static string WriteNewDataFilesSqlBatch(const vector<DuckLakeFileInfo> &new_files,
-	                                        const vector<DuckLakePath> &resolved_paths, bool supports_v1_1_metadata);
+	static DuckLakeBatch WriteNewDataFilesSqlBatch(const vector<DuckLakeFileInfo> &new_files,
+	                                               const vector<DuckLakePath> &resolved_paths,
+	                                               bool supports_v1_1_metadata);
 	//! Opt-in fast-path: if this backend supports the DuckDB Appender API, write the files directly
 	bool TryAppendDataFiles(DuckLakeSnapshot &commit_snapshot, const vector<DuckLakeFileInfo> &new_files,
 	                        const vector<DuckLakeTableInfo> &new_tables,
@@ -537,8 +542,8 @@ public:
 	static string DeleteOverwrittenDeleteFiles(const vector<DuckLakeOverwrittenDeleteFile> &overwritten_files,
 	                                           const vector<DuckLakePath> &resolved_paths);
 	//! Caller supplies one resolved path per new delete file, in the same order.
-	static string WriteNewDeleteFiles(const vector<DuckLakeDeleteFileInfo> &new_delete_files,
-	                                  const vector<DuckLakePath> &resolved_paths, bool write_row_group_count);
+	static DuckLakeBatch WriteNewDeleteFiles(const vector<DuckLakeDeleteFileInfo> &new_delete_files,
+	                                         const vector<DuckLakePath> &resolved_paths, bool write_row_group_count);
 	static string WriteNewMacros(const vector<DuckLakeMacroInfo> &new_macros);
 
 	virtual vector<DuckLakeColumnMappingInfo> GetColumnMappings(optional_idx start_from);

@@ -499,6 +499,10 @@ string DuckLakeUtil::EncryptionKeyLiteral(const string &key) {
 	return "'" + Blob::ToBase64(string_t(key)) + "'";
 }
 
+Value DuckLakeUtil::EncryptionKeyValue(const string &key) {
+	return key.empty() ? Value() : Value(Blob::ToBase64(string_t(key)));
+}
+
 string DuckLakeUtil::WithBinaryCollation(const string &expression) {
 	return "(" + expression + " COLLATE \"C\")";
 }

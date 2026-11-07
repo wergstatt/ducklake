@@ -89,6 +89,7 @@ public:
 	static string MappingIdOrNull(const MappingIndex &m);
 
 	static string EncryptionKeyLiteral(const string &key);
+	static Value EncryptionKeyValue(const string &key);
 
 	//! The text expression compared byte for byte, in DuckDB and in Postgres
 	static string WithBinaryCollation(const string &expression);

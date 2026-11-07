@@ -1,0 +1,28 @@
+# name: test/sql/metadata/parameter_text_in_values.test
+# description: a path that contains a parameter or the end of a statement is stored as it is
+# group: [metadata]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/parameter_text_in_values.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS lake (DATA_PATH '{DATA_PATH}/parameter_text_in_values')
+
+statement ok
+CREATE TABLE lake.t (i INTEGER)
+
+statement ok
+COPY (SELECT 42 AS i) TO '{DATA_PATH}/parameter_$1;.parquet'
+
+statement ok
+CALL ducklake_add_data_files('lake', 't', '{DATA_PATH}/parameter_$1;.parquet')
+
+query I
+SELECT i FROM lake.t
+----
+42

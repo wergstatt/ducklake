@@ -3276,6 +3276,11 @@ unique_ptr<QueryResult> DuckLakeMetadataManager::Execute(DuckLakeSnapshot snapsh
 	return Query(snapshot, query);
 }
 
+unique_ptr<QueryResult> DuckLakeMetadataManager::Execute(DuckLakeSnapshot snapshot, const DuckLakeBatch &batch) {
+	auto query = batch.ToSQL();
+	return Execute(snapshot, query);
+}
+
 unique_ptr<QueryResult> DuckLakeMetadataManager::Execute(string &query) {
 	return Query(query);
 }
@@ -3553,6 +3558,35 @@ string DuckLakeMetadataManager::InsertValuesSql(const string &table_name, const 
 string DuckLakeMetadataManager::InsertValuesIntoSql(const string &qualified_table_name, const vector<string> &values) {
 	auto insert_prefix = "INSERT INTO " + qualified_table_name + " VALUES ";
 	return ChunkValuesStatements(values, [&](const string &tuples) { return insert_prefix + tuples + ";"; });
+}
+
+DuckLakeBatch DuckLakeMetadataManager::InsertValuesBatch(const string &table_name,
+                                                         const vector<DuckLakeStatement> &values) {
+	DuckLakeBatch result;
+	DuckLakeStatement tuples;
+	// the size of the tuples with their values written as literals
+	idx_t size = 0;
+	auto add_statement = [&]() {
+		tuples.sql = "INSERT INTO {METADATA_CATALOG}." + table_name + " VALUES " + tuples.sql + ";";
+		result += std::move(tuples);
+		tuples = DuckLakeStatement();
+		size = 0;
+	};
+	for (auto &tuple : values) {
+		if (!tuples.sql.empty()) {
+			tuples.sql += ", ";
+			size += 2;
+		}
+		tuples.Append(tuple);
+		size += tuple.ToSQL().size();
+		if (size >= MAX_VALUES_LIST_LENGTH) {
+			add_statement();
+		}
+	}
+	if (!tuples.sql.empty()) {
+		add_statement();
+	}
+	return result;
 }
 
 string DuckLakeMetadataManager::WriteNewTables(const vector<DuckLakeTableInfo> &new_tables,
@@ -4683,16 +4717,16 @@ bool DuckLakeMetadataManager::TryAppendDataFiles(DuckLakeSnapshot &commit_snapsh
 	return true;
 }
 
-string DuckLakeMetadataManager::WriteNewDataFilesSqlBatch(const vector<DuckLakeFileInfo> &new_files,
-                                                          const vector<DuckLakePath> &resolved_paths,
-                                                          bool supports_v1_1_metadata) {
+DuckLakeBatch DuckLakeMetadataManager::WriteNewDataFilesSqlBatch(const vector<DuckLakeFileInfo> &new_files,
+                                                                 const vector<DuckLakePath> &resolved_paths,
+                                                                 bool supports_v1_1_metadata) {
 	if (new_files.empty()) {
 		// LCOV_EXCL_START
-		return string();
+		return DuckLakeBatch();
 		// LCOV_EXCL_STOP
 	}
 	D_ASSERT(new_files.size() == resolved_paths.size());
-	vector<string> data_file_values;
+	vector<DuckLakeStatement> data_file_values;
 	vector<string> column_stats_values;
 	vector<string> variant_stats_values;
 	vector<string> partition_values;
@@ -4706,18 +4740,17 @@ string DuckLakeMetadataManager::WriteNewDataFilesSqlBatch(const vector<DuckLakeF
 		    file.begin_snapshot.IsValid() ? to_string(file.begin_snapshot.GetIndex()) : "{SNAPSHOT_ID}";
 		auto data_file_index = file.id.index;
 		auto table_id = file.table_id.index;
-		auto encryption_key = DuckLakeUtil::EncryptionKeyLiteral(file.encryption_key);
 		string partial_max = DuckLakeUtil::OptionalIdxOrNull(file.max_partial_file_snapshot);
 		string footer_size = DuckLakeUtil::OptionalIdxOrNull(file.footer_size);
 		string mapping = DuckLakeUtil::MappingIdOrNull(file.mapping_id);
 		auto data_file_value = StringUtil::Format(
-		    "(%d, %d, %s, NULL, NULL, %s, %s, 'parquet', %d, %d, %s, %s, %s, %s, %s, %s", data_file_index, table_id,
+		    "(%d, %d, %s, NULL, NULL, %s, %s, 'parquet', %d, %d, %s, %s, %s, $1, %s, %s", data_file_index, table_id,
 		    begin_snapshot, SQLString(path.path), DuckLakeUtil::BoolLiteral(path.path_is_relative), file.row_count,
-		    file.file_size_bytes, footer_size, row_id, partition_id, encryption_key, mapping, partial_max);
+		    file.file_size_bytes, footer_size, row_id, partition_id, mapping, partial_max);
 		if (supports_v1_1_metadata) {
 			data_file_value += ", " + DuckLakeUtil::OptionalIdxOrNull(file.row_group_count);
 		}
-		data_file_values.push_back(data_file_value + ")");
+		data_file_values.push_back({data_file_value + ")", {DuckLakeUtil::EncryptionKeyValue(file.encryption_key)}});
 		for (auto &raw_stats : file.column_stats) {
 			auto column_stats = DuckLakeColumnStatsInfo::FromColumnStats(raw_stats.first, raw_stats.second);
 			auto column_id = column_stats.column_id.index;
@@ -4748,10 +4781,11 @@ string DuckLakeMetadataManager::WriteNewDataFilesSqlBatch(const vector<DuckLakeF
 			                                              part_val.partition_column_idx, partition_value));
 		}
 	}
-	return InsertValuesSql("ducklake_data_file", data_file_values) +
-	       InsertValuesSql("ducklake_file_column_stats", column_stats_values) +
-	       InsertValuesSql("ducklake_file_partition_value", partition_values) +
-	       InsertValuesSql("ducklake_file_variant_stats", variant_stats_values);
+	auto result = InsertValuesBatch("ducklake_data_file", data_file_values);
+	result += InsertValuesSql("ducklake_file_column_stats", column_stats_values) +
+	          InsertValuesSql("ducklake_file_partition_value", partition_values) +
+	          InsertValuesSql("ducklake_file_variant_stats", variant_stats_values);
+	return result;
 }
 
 string DuckLakeMetadataManager::GetExistingDataFilesSql(const set<DataFileIndex> &files) {
@@ -4881,38 +4915,38 @@ WHERE delete_file_id IN (%s);
 	return batch_query + InsertValuesSql("ducklake_files_scheduled_for_deletion", scheduled_deletions);
 }
 
-string DuckLakeMetadataManager::WriteNewDeleteFiles(const vector<DuckLakeDeleteFileInfo> &new_files,
-                                                    const vector<DuckLakePath> &resolved_paths,
-                                                    bool write_row_group_count) {
+DuckLakeBatch DuckLakeMetadataManager::WriteNewDeleteFiles(const vector<DuckLakeDeleteFileInfo> &new_files,
+                                                           const vector<DuckLakePath> &resolved_paths,
+                                                           bool write_row_group_count) {
 	if (new_files.empty()) {
 		return {};
 	}
 	if (resolved_paths.size() != new_files.size()) {
 		throw InternalException("WriteNewDeleteFiles: resolved_paths size mismatch");
 	}
-	vector<string> delete_file_values;
+	vector<DuckLakeStatement> delete_file_values;
 	for (idx_t i = 0; i < new_files.size(); ++i) {
 		auto &file = new_files[i];
 		auto &path = resolved_paths[i];
 		auto delete_file_index = file.id.index;
 		auto table_id = file.table_id.index;
 		auto data_file_index = file.data_file_id.index;
-		auto encryption_key = DuckLakeUtil::EncryptionKeyLiteral(file.encryption_key);
 		// Use explicit begin_snapshot if set (for flush operations), otherwise use commit snapshot
 		string begin_snapshot_str =
 		    file.begin_snapshot.IsValid() ? std::to_string(file.begin_snapshot.GetIndex()) : "{SNAPSHOT_ID}";
 		string partial_max = DuckLakeUtil::OptionalIdxOrNull(file.max_snapshot);
 		auto delete_file_value = StringUtil::Format(
-		    "(%d, %d, %s, NULL,  %d, %s, %s, %s, %d, %d, %d, %s, %s", delete_file_index, table_id, begin_snapshot_str,
+		    "(%d, %d, %s, NULL,  %d, %s, %s, %s, %d, %d, %d, $1, %s", delete_file_index, table_id, begin_snapshot_str,
 		    data_file_index, SQLString(path.path), DuckLakeUtil::BoolLiteral(path.path_is_relative),
 		    SQLString(DeleteFileFormatToString(file.format)), file.delete_count, file.file_size_bytes, file.footer_size,
-		    encryption_key, partial_max);
+		    partial_max);
 		if (write_row_group_count) {
 			delete_file_value += ", " + DuckLakeUtil::OptionalIdxOrNull(file.row_group_count);
 		}
-		delete_file_values.push_back(delete_file_value + ")");
+		delete_file_values.push_back(
+		    {delete_file_value + ")", {DuckLakeUtil::EncryptionKeyValue(file.encryption_key)}});
 	}
-	return InsertValuesSql("ducklake_delete_file", delete_file_values);
+	return InsertValuesBatch("ducklake_delete_file", delete_file_values);
 }
 
 vector<DuckLakeColumnMappingInfo> DuckLakeMetadataManager::GetColumnMappings(optional_idx start_from) {

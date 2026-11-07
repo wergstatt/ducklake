@@ -1678,7 +1678,7 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 	auto config_option_lock = ConfigOptionLockSql();
 	context.locks_config_options = !config_option_lock.empty();
 	bool option_lock_failed = false;
-	context.execute_commit_batch = [&](DuckLakeSnapshot snapshot, string &query) {
+	context.execute_commit_batch = [&](DuckLakeSnapshot snapshot, const DuckLakeBatch &query) {
 		option_lock_failed = false;
 		unique_ptr<QueryResult> result;
 		if (!query.empty()) {
