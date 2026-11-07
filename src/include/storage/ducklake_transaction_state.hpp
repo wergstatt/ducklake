@@ -159,6 +159,10 @@ struct DuckLakeCommitContext {
 	std::function<void(const vector<DuckLakeConfigOption> &)> set_table_options =
 	    [](const vector<DuckLakeConfigOption> &) {
 	    };
+	//! Keeps the schema versions that the commit wrote for its tables on the catalog.
+	std::function<void(idx_t, const map<TableIndex, DuckLakeTableSchemaVersions> &)> set_table_schema_versions =
+	    [](idx_t, const map<TableIndex, DuckLakeTableSchemaVersions> &) {
+	    };
 	//! Invalidates the cached stats entry for a table after a stats-affecting file drop.
 	std::function<void(idx_t, TableIndex)> invalidate_table_stats_cache = [](idx_t, TableIndex) {
 	};
@@ -317,6 +321,8 @@ public:
 	//! The tables whose inlined file deletions were flushed, with the snapshot of the flush
 	map<TableIndex, idx_t> flushed_inlined_file_deletions;
 	vector<DuckLakeConfigOption> committed_table_options;
+	//! The schema versions of the tables that this commit writes a schema version for, the creation if it creates them
+	map<TableIndex, DuckLakeTableSchemaVersions> committed_schema_versions;
 	//! The statistics written for the fields that this commit adds to existing tables
 	map<TableIndex, map<FieldIndex, DuckLakeColumnStats>> added_field_stats;
 	//! The tables whose stored size this commit reads back from their live data files

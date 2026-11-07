@@ -1876,6 +1876,10 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 			ducklake_catalog.SetConfigOption(option);
 		}
 	};
+	context.set_table_schema_versions = [&](idx_t schema_version,
+	                                        const map<TableIndex, DuckLakeTableSchemaVersions> &committed_versions) {
+		ducklake_catalog.CacheCommittedSchemaVersions(schema_version, committed_versions);
+	};
 	context.invalidate_table_stats_cache = [&](idx_t next_file_id, TableIndex table_id) {
 		ducklake_catalog.InvalidateTableStatsCache(next_file_id, table_id);
 	};

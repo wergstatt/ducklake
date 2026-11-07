@@ -2219,6 +2219,7 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
                                                const DuckLakeCommitContext &context,
                                                map<TableIndex, DroppedDataFileStats> &attempt_dropped_file_stats) {
 	committed_table_options.clear();
+	committed_schema_versions.clear();
 	added_field_stats.clear();
 	refreshed_table_sizes.clear();
 	set<TableIndex> refreshed_record_counts;
@@ -2506,6 +2507,16 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
 		}
 	}
 	batch_queries += DuckLakeMetadataManager::InsertNewSchema(commit_snapshot, tables_with_schema_changes);
+	for (auto &table_id : tables_with_schema_changes) {
+		committed_schema_versions[table_id].last_change = commit_snapshot.schema_version;
+	}
+	for (auto &entry : commit_state.committed_tables) {
+		auto created_table = committed_schema_versions.find(entry.second);
+		if (IsTransactionLocal(entry.first) && created_table != committed_schema_versions.end()) {
+			// the schema version of a table that this commit creates is its first
+			created_table->second.creation = commit_snapshot.schema_version;
+		}
+	}
 
 	return batch_queries;
 }
@@ -2929,6 +2940,7 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 	context.set_entry_oids(new_entry_oids);
 	context.set_committed_snapshot_id(commit_snapshot.snapshot_id);
 	context.set_table_options(committed_table_options);
+	context.set_table_schema_versions(commit_snapshot.schema_version, committed_schema_versions);
 	for (auto &entry : dropped_file_stats) {
 		context.invalidate_table_stats_cache(commit_snapshot.next_file_id, entry.first);
 	}

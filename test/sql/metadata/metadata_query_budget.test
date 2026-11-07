@@ -392,3 +392,31 @@ getvariable('alter_0') > 0 AND getvariable('alter_0') = getvariable('alter_1'),
 getvariable('expire_0') > 0 AND getvariable('expire_0') = getvariable('expire_1')
 ----
 true	true	true	true	true
+
+# an insert takes the schema versions of its table from the commit that created or altered the table
+statement ok
+CALL ducklake.set_option('data_inlining_row_limit', 10)
+
+statement ok
+CREATE TABLE ducklake.created_inlined (a INTEGER)
+
+statement ok
+CALL enable_logging('DuckLakeMetadata')
+
+statement ok
+INSERT INTO ducklake.created_inlined VALUES (1)
+
+statement ok
+ALTER TABLE ducklake.created_inlined ADD COLUMN b INTEGER
+
+statement ok
+INSERT INTO ducklake.created_inlined VALUES (2, 2)
+
+statement ok
+CALL disable_logging()
+
+query II
+SELECT count(*) > 0, count(*) FILTER (WHERE query LIKE '%MIN(schema_version), MAX(schema_version)%')
+FROM duckdb_logs_parsed('DuckLakeMetadata')
+----
+true	0

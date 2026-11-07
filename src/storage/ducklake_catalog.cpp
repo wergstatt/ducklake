@@ -1540,6 +1540,22 @@ DuckLakeTableSchemaVersions DuckLakeCatalog::GetTableSchemaVersions(DuckLakeTran
 	return schema_versions;
 }
 
+void DuckLakeCatalog::CacheCommittedSchemaVersions(
+    idx_t schema_version, const map<TableIndex, DuckLakeTableSchemaVersions> &committed_versions) {
+	lock_guard<mutex> guard(schema_version_snapshot_lock);
+	for (auto &committed : committed_versions) {
+		auto schema_versions = committed.second;
+		auto entry = table_schema_versions.find(committed.first.index);
+		if (!schema_versions.creation.IsValid() && entry != table_schema_versions.end()) {
+			// the first schema version of a table never changes
+			schema_versions.creation = entry->second.second.creation;
+		}
+		if (schema_versions.creation.IsValid()) {
+			table_schema_versions[committed.first.index] = make_pair(schema_version, schema_versions);
+		}
+	}
+}
+
 optional_idx DuckLakeCatalog::TryGetSchemaVersionBeginSnapshot(TableIndex table_id, idx_t schema_version) {
 	lock_guard<mutex> guard(schema_version_snapshot_lock);
 	auto entry = schema_version_begin_snapshots.find(make_pair(table_id.index, schema_version));
