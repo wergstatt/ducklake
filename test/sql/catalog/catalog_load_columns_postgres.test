@@ -54,7 +54,7 @@ statement ok
 USE ducklake
 
 # Every scan of ducklake_column sent to Postgres has the snapshot filter of a loaded catalog, or with a pipeline every
-# read of it has the filter with the snapshot as a parameter
+# read of it has the filter with the snapshot as a parameter, or that of the latest snapshot
 query I
 SELECT CASE WHEN (SELECT catalog_type FROM settings()) = 'postgres' THEN
 	(SELECT bool_or(contains(query, printf('"begin_snapshot" <= %d AND ("end_snapshot" > %d OR "end_snapshot" IS NULL)',
@@ -64,7 +64,8 @@ SELECT CASE WHEN (SELECT catalog_type FROM settings()) = 'postgres' THEN
 	    AND bool_and(contains(query, '"begin_snapshot" <= '))
 	 FROM (SELECT message AS query FROM duckdb_logs WHERE type = 'PostgresQueryLog') logs
 	 WHERE contains(query, '"ducklake_column" '))
-	OR (SELECT count(*) >= 2 AND bool_and(contains(query, 'ducklake_column WHERE $1 >= begin_snapshot AND '))
+	OR (SELECT count(*) >= 2 AND bool_and(contains(query, 'ducklake_column WHERE $1 >= begin_snapshot AND ')
+	                                      OR contains(query, 'ducklake_column WHERE end_snapshot IS NULL AND '))
 	    FROM (SELECT message AS query FROM duckdb_logs WHERE type = 'PostgresQueryLog') logs
 	    WHERE contains(query, '.ducklake_column '))
 	ELSE true END

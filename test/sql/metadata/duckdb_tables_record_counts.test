@@ -39,7 +39,7 @@ SELECT count(*) FROM (SHOW ALL TABLES) WHERE database = 'ducklake'
 
 # Cached counts avoid repeated queries
 query I
-SELECT count(*) FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE query LIKE '%ducklake_table_stats%'
+SELECT count(*) FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE query LIKE '%SELECT table_id, record_count%'
 ----
 1
 

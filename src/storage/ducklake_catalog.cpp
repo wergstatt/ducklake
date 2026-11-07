@@ -505,15 +505,26 @@ idx_t DuckLakeCatalog::GetBeginSnapshotForSchemaVersion(TableIndex table_id, idx
 
 optional_ptr<DuckLakeTableEntry> DuckLakeCatalog::GetTableAtSchemaVersion(DuckLakeTransaction &transaction,
                                                                           TableIndex table_id, idx_t schema_version) {
-	DuckLakeSnapshot snapshot(GetBeginSnapshotForSchemaVersion(table_id, schema_version, transaction), schema_version,
-	                          0, 0);
-	auto entry = GetEntryById(transaction, snapshot, table_id);
+	// the cache needs only the schema version, loading the schema also its begin snapshot
+	auto schema = GetObjectCacheInstance().Get<DuckLakeSchemaCacheEntry>(SchemaCacheKey(schema_version));
+	if (!schema) {
+		DuckLakeSnapshot snapshot(GetBeginSnapshotForSchemaVersion(table_id, schema_version, transaction),
+		                          schema_version, 0, 0);
+		schema = GetSchemaCacheEntry(transaction, snapshot);
+	}
+	auto entry = schema->catalog_set.GetEntryById(table_id);
+	transaction.PinSchemaCacheEntry(std::move(schema));
 	if (!entry) {
 		// LCOV_EXCL_START
 		return nullptr;
 		// LCOV_EXCL_STOP
 	}
 	return &entry->Cast<DuckLakeTableEntry>();
+}
+
+//! The newer of an id and the newest one so far
+static optional_idx Newest(optional_idx newest, idx_t id) {
+	return newest.IsValid() && newest.GetIndex() > id ? newest : optional_idx(id);
 }
 
 shared_ptr<DuckLakeSchemaCacheEntry> DuckLakeCatalog::GetSchemaCacheEntry(DuckLakeTransaction &transaction,
@@ -528,6 +539,7 @@ shared_ptr<DuckLakeSchemaCacheEntry> DuckLakeCatalog::GetSchemaCacheEntry(DuckLa
 	lock_guard<mutex> guard(cache_entries_lock);
 	auto entry = cache.GetOrCreate<DuckLakeSchemaCacheEntry>(key, std::move(catalog_set));
 	TrackCacheEntry(key, entry);
+	newest_loaded_schema_version = Newest(newest_loaded_schema_version, snapshot.schema_version);
 	return entry;
 }
 
@@ -1105,6 +1117,10 @@ shared_ptr<DuckLakeTableStats> DuckLakeCatalog::GetTableStats(DuckLakeTransactio
 		cache_entries_to_put.emplace_back(current_id, std::move(entry));
 	}
 	PutStatsCacheEntries(snapshot.next_file_id, std::move(cache_entries_to_put));
+	if (!load_tables) {
+		lock_guard<mutex> guard(cache_entries_lock);
+		newest_stats_snapshot = Newest(newest_stats_snapshot, snapshot.snapshot_id);
+	}
 	if (!requested_entry || !requested_entry->has_stats) {
 		return nullptr;
 	}
@@ -1538,6 +1554,46 @@ DuckLakeTableSchemaVersions DuckLakeCatalog::GetTableSchemaVersions(DuckLakeTran
 	lock_guard<mutex> guard(schema_version_snapshot_lock);
 	table_schema_versions[table_id.index] = make_pair(snapshot.schema_version, schema_versions);
 	return schema_versions;
+}
+
+void DuckLakeCatalog::CacheTableSchemaVersions(idx_t schema_version,
+                                               const map<TableIndex, map<idx_t, idx_t>> &begin_snapshots) {
+	lock_guard<mutex> guard(schema_version_snapshot_lock);
+	for (auto &table : begin_snapshots) {
+		DuckLakeTableSchemaVersions schema_versions;
+		schema_versions.creation = table.second.begin()->first;
+		schema_versions.last_change = table.second.rbegin()->first;
+		table_schema_versions[table.first.index] = make_pair(schema_version, schema_versions);
+		for (auto &version : table.second) {
+			schema_version_begin_snapshots[make_pair(table.first.index, version.first)] = version.second;
+		}
+	}
+	cached_table_schema_versions = schema_version;
+}
+
+DuckLakeCachedReadKeys DuckLakeCatalog::GetCachedReadKeys() {
+	DuckLakeCachedReadKeys keys;
+	{
+		lock_guard<mutex> guard(cache_entries_lock);
+		keys.schema_version = newest_loaded_schema_version;
+		keys.table_stats = newest_stats_snapshot;
+	}
+	if (keys.schema_version.IsValid()) {
+		auto schema =
+		    GetObjectCacheInstance().Get<DuckLakeSchemaCacheEntry>(SchemaCacheKey(keys.schema_version.GetIndex()));
+		// the object cache can have evicted the schema
+		keys.schema_version = schema ? keys.schema_version : optional_idx();
+		keys.table_count = schema ? schema->catalog_set.GetTableIdMap().size() : 0;
+	}
+	{
+		lock_guard<mutex> guard(schema_version_snapshot_lock);
+		keys.table_schema_versions = cached_table_schema_versions;
+	}
+	lock_guard<mutex> guard(inlined_deletion_cache_lock);
+	if (!inlined_deletion_tables.empty()) {
+		keys.inlined_deletion_tables = inlined_deletion_tables.rbegin()->first;
+	}
+	return keys;
 }
 
 optional_idx DuckLakeCatalog::TryGetSchemaVersionBeginSnapshot(TableIndex table_id, idx_t schema_version) {

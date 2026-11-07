@@ -87,7 +87,9 @@ SELECT count(*), max(id) FROM ducklake.t1
 ----
 11	100
 
+# or they come with the snapshot of the first select, which the second one reads again only if a commit came between
 query I
-SELECT count(*) FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE query LIKE '%ducklake_table_column_stats%'
+SELECT count(*) <= 1 FROM duckdb_logs_parsed('DuckLakeMetadata')
+WHERE query LIKE '%ducklake_table_column_stats%' AND query NOT LIKE '%SELECT snapshot_id%'
 ----
-1
+true

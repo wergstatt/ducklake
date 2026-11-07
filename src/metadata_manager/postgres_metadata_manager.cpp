@@ -422,18 +422,19 @@ bool PostgresMetadataManager::IsRetryableCommitError(const string &message) cons
 	return false;
 }
 
+string PostgresMetadataManager::InlinedDeletionTablesQuery() const {
+	// one listing serves every table of the snapshot, a name the LIKE wildcard _ matches too is never looked up
+	// a kept result of a pipeline has no binary reader for the type name
+	return StringUtil::Format("SELECT CAST(tablename AS TEXT) FROM pg_catalog.pg_tables WHERE schemaname = %s AND "
+	                          "tablename LIKE 'ducklake_inlined_delete_%%'",
+	                          SQLString::ToString(transaction.GetCatalog().MetadataSchemaName().GetIdentifierName()));
+}
+
 bool PostgresMetadataManager::InlinedDeletionTableExists(const Identifier &table_name) {
-	auto &catalog = transaction.GetCatalog();
-	auto remote_query =
-	    StringUtil::Format("SELECT 1 FROM pg_catalog.pg_tables WHERE schemaname = %s AND tablename = %s LIMIT 1",
-	                       SQLString::ToString(catalog.MetadataSchemaName().GetIdentifierName()),
-	                       SQLString::ToString(table_name.GetIdentifierName()));
 	auto query =
-	    StringUtil::Format("SELECT 1 FROM postgres_query({METADATA_CATALOG_NAME_LITERAL}, %s, use_transaction = true)",
-	                       SQLString::ToString(remote_query));
-	auto result = DuckLakeMetadataManager::Query(query);
-	result->ThrowIfError("Failed to probe for DuckLake inlined-deletion table: ");
-	return result->Fetch() != nullptr;
+	    StringUtil::Format("SELECT * FROM postgres_query({METADATA_CATALOG_NAME_LITERAL}, %s, use_transaction = true)",
+	                       SQLString::ToString(InlinedDeletionTablesQuery()));
+	return InlinedDeletionTableListed(table_name, std::move(query));
 }
 
 void PostgresMetadataManager::MigrateInlinedDataTypes() {
@@ -566,31 +567,54 @@ vector<string> PostgresMetadataManager::KeepResults(DuckLakeSnapshot snapshot, c
 	return scans;
 }
 
-DuckLakeCatalogInfo PostgresMetadataManager::GetCatalogForSnapshot(DuckLakeSnapshot snapshot) {
-	if (!ScannerFunction(*transaction.GetConnection().context, "postgres_pipeline_result")) {
-		return DuckLakeMetadataManager::GetCatalogForSnapshot(snapshot);
-	}
-	auto &ducklake_catalog = transaction.GetCatalog();
-	// the tables of the catalog are read as they are at the snapshot, the tables of their parts whole
+//! Adds a read of every metadata table of the catalog with its filter, and returns the tables in the order of the reads
+static vector<string> AddCatalogReads(DuckLakeReadBatch &reads, bool supports_v1_1_metadata,
+                                      const DuckLakeStatement &versioned_filter, const DuckLakeStatement &part_filter) {
+	// the tables of the catalog are read as they are at a snapshot, the tables of their parts whole
 	vector<string> tables = {"ducklake_schema", "ducklake_table",          "ducklake_tag",
 	                         "ducklake_column", "ducklake_column_tag",     "ducklake_view",
 	                         "ducklake_macro",  "ducklake_partition_info", "ducklake_sort_info"};
-	if (ducklake_catalog.SupportsV1_1Metadata()) {
+	if (supports_v1_1_metadata) {
 		tables.emplace_back("ducklake_view_column_tag");
 	}
-	DuckLakeReadBatch reads;
 	for (auto &table : tables) {
-		reads.Add({"SELECT * FROM {METADATA_CATALOG}." + table +
-		               " WHERE $1 >= begin_snapshot AND ($1 < end_snapshot OR end_snapshot IS NULL)",
-		           {Value::UBIGINT(snapshot.snapshot_id)}});
+		reads.Add(
+		    {"SELECT * FROM {METADATA_CATALOG}." + table + " WHERE " + versioned_filter.sql, versioned_filter.params});
 	}
 	for (string table : {"ducklake_inlined_data_tables", "ducklake_macro_impl", "ducklake_macro_parameters",
 	                     "ducklake_partition_column", "ducklake_sort_expression"}) {
-		reads.Add({"SELECT * FROM {METADATA_CATALOG}." + table});
+		reads.Add(
+		    {"SELECT * FROM {METADATA_CATALOG}." + table + (part_filter.sql.empty() ? "" : " WHERE ") + part_filter.sql,
+		     part_filter.params});
 		tables.push_back(std::move(table));
 	}
+	return tables;
+}
+
+DuckLakeCatalogInfo PostgresMetadataManager::GetCatalogForSnapshot(DuckLakeSnapshot snapshot) {
+	{
+		lock_guard<mutex> guard(read_ahead_lock);
+		if (read_ahead_catalog && read_ahead_catalog->first == snapshot.schema_version) {
+			auto catalog = std::move(read_ahead_catalog->second);
+			read_ahead_catalog.reset();
+			return catalog;
+		}
+	}
+	if (!ScannerFunction(*transaction.GetConnection().context, "postgres_pipeline_result")) {
+		return DuckLakeMetadataManager::GetCatalogForSnapshot(snapshot);
+	}
+	DuckLakeReadBatch reads;
+	auto tables = AddCatalogReads(reads, transaction.GetCatalog().SupportsV1_1Metadata(),
+	                              {"$1 >= begin_snapshot AND ($1 < end_snapshot OR end_snapshot IS NULL)",
+	                               {Value::UBIGINT(snapshot.snapshot_id)}},
+	                              {});
+	return BuildCatalog(snapshot, tables, KeepResults(snapshot, reads));
+}
+
+DuckLakeCatalogInfo PostgresMetadataManager::BuildCatalog(DuckLakeSnapshot snapshot, const vector<string> &tables,
+                                                          const vector<string> &scans) {
+	auto &ducklake_catalog = transaction.GetCatalog();
 	// the queries of the catalog run on the results of the reads, each in place of its table
-	auto scans = KeepResults(snapshot, reads);
 	return BuildCatalogForSnapshot(
 	    snapshot,
 	    [&](DuckLakeSnapshot s, string query) {
@@ -604,6 +628,135 @@ DuckLakeCatalogInfo PostgresMetadataManager::GetCatalogForSnapshot(DuckLakeSnaps
 		    return DuckLakeMetadataManager::Query(s, "WITH " + StringUtil::Join(results, ", ") + query);
 	    },
 	    ducklake_catalog.DataPath(), ducklake_catalog.Separator(), ducklake_catalog.SupportsV1_1Metadata());
+}
+
+//! The snapshot id of the latest snapshot
+static string LatestSnapshotId() {
+	return "(SELECT MAX(snapshot_id) FROM {METADATA_CATALOG}.ducklake_snapshot)";
+}
+
+//! The condition of a read that the server skips when the latest snapshot has the schema version of the cache, $1
+static string SchemaVersionChanged() {
+	return "$1 <> (SELECT schema_version FROM {METADATA_CATALOG}.ducklake_snapshot WHERE snapshot_id = " +
+	       LatestSnapshotId() + ")";
+}
+
+//! The condition of a read that the server skips when the latest snapshot is the snapshot of the cache, $1
+static string SnapshotChanged() {
+	return "$1 <> " + LatestSnapshotId();
+}
+
+//! The key of a cache as a parameter, with -1 for an empty cache, which is no snapshot id or schema version
+static DuckLakeStatement CacheKey(const string &condition, optional_idx key) {
+	return {condition, {Value::BIGINT(key.IsValid() ? NumericCast<int64_t>(key.GetIndex()) : -1)}};
+}
+
+//! Whether the cache key differs from the snapshot id or schema version, so that its read returned rows
+static bool Differs(optional_idx key, idx_t value) {
+	return !key.IsValid() || key.GetIndex() != value;
+}
+
+unique_ptr<DuckLakeSnapshot> PostgresMetadataManager::GetSnapshot() {
+	if (!ScannerFunction(*transaction.GetConnection().context, "postgres_pipeline_result")) {
+		return DuckLakeMetadataManager::GetSnapshot();
+	}
+	auto &catalog = transaction.GetCatalog();
+	auto snapshot_query = LatestSnapshotQuery();
+	StringUtil::RTrim(snapshot_query, ";");
+	// READ COMMITTED reads see the commits before them, which a second read of the snapshot at the end shows
+	bool read_committed = ShowsConcurrentCommits();
+	// a commit that retries binds nothing, it needs no catalog of the latest snapshot
+	bool read_catalog = !transaction.ChangesMade();
+	for (idx_t attempt = 0;; attempt++) {
+		// every read that a binder may need, which the server skips when the cache already holds its rows
+		auto keys = catalog.GetCachedReadKeys();
+		DuckLakeReadBatch reads;
+		reads.Add({snapshot_query, {}});
+		vector<string> catalog_tables;
+		if (read_catalog) {
+			catalog_tables =
+			    AddCatalogReads(reads, catalog.SupportsV1_1Metadata(),
+			                    CacheKey("end_snapshot IS NULL AND " + SchemaVersionChanged(), keys.schema_version),
+			                    CacheKey(SchemaVersionChanged(), keys.schema_version));
+		}
+		auto schema_versions = reads.Add(CacheKey("SELECT table_id, schema_version, begin_snapshot FROM "
+		                                          "{METADATA_CATALOG}.ducklake_schema_versions WHERE " +
+		                                              SchemaVersionChanged(),
+		                                          keys.table_schema_versions));
+		auto deletion_tables = reads.Add(
+		    CacheKey(InlinedDeletionTablesQuery() + " AND " + SnapshotChanged(), keys.inlined_deletion_tables));
+		// the stats of every table, which a scan reads after each commit, ahead only for a catalog of few tables
+		optional_idx stats;
+		if (!keys.schema_version.IsValid() || keys.table_count <= MAX_TABLES_WITH_STATS_READ_AHEAD) {
+			stats = reads.Add(CacheKey(GlobalTableStatsQuery(catalog.SupportsV1_1Metadata(), {}, SnapshotChanged()),
+			                           keys.table_stats));
+		}
+		if (read_committed) {
+			reads.Add({snapshot_query, {}});
+		}
+		auto scans = KeepResults(DuckLakeSnapshot(), reads);
+		auto snapshot = ParseLatestSnapshot(*transaction.ExecuteRaw(scans[0]));
+		if (read_committed) {
+			auto last_snapshot = ParseSnapshot(*transaction.ExecuteRaw(scans.back()));
+			if (!last_snapshot || last_snapshot->snapshot_id != snapshot->snapshot_id) {
+				if (attempt == 0) {
+					continue;
+				}
+				// the reads keep seeing commits, the caches read at the snapshot instead
+				return snapshot;
+			}
+		}
+		if (read_catalog && Differs(keys.schema_version, snapshot->schema_version)) {
+			vector<string> catalog_scans(scans.begin() + 1, scans.begin() + 1 + catalog_tables.size());
+			auto catalog_info = BuildCatalog(*snapshot, catalog_tables, catalog_scans);
+			lock_guard<mutex> guard(read_ahead_lock);
+			read_ahead_catalog =
+			    make_uniq<pair<idx_t, DuckLakeCatalogInfo>>(snapshot->schema_version, std::move(catalog_info));
+		}
+		if (Differs(keys.table_schema_versions, snapshot->schema_version)) {
+			auto result = transaction.ExecuteRaw(scans[schema_versions]);
+			result->ThrowIfError("Failed to read the schema versions of the tables from DuckLake: ");
+			map<TableIndex, map<idx_t, idx_t>> begin_snapshots;
+			for (auto &row : *result) {
+				begin_snapshots[TableIndex(row.GetValue<idx_t>(0))][row.GetValue<idx_t>(1)] = row.GetValue<idx_t>(2);
+			}
+			catalog.CacheTableSchemaVersions(snapshot->schema_version, begin_snapshots);
+		}
+		if (Differs(keys.inlined_deletion_tables, snapshot->snapshot_id)) {
+			catalog.GetInlinedDeletionTables(
+			    snapshot->snapshot_id, [&]() { return ListedTables(*transaction.ExecuteRaw(scans[deletion_tables])); });
+		}
+		if (stats.IsValid() && Differs(keys.table_stats, snapshot->snapshot_id)) {
+			auto global_stats = ParseGlobalTableStats(*transaction.ExecuteRaw(scans[stats.GetIndex()]));
+			lock_guard<mutex> guard(read_ahead_lock);
+			read_ahead_stats =
+			    make_uniq<pair<idx_t, vector<DuckLakeGlobalStatsInfo>>>(snapshot->snapshot_id, std::move(global_stats));
+		}
+		return snapshot;
+	}
+}
+
+vector<DuckLakeGlobalStatsInfo> PostgresMetadataManager::GetGlobalTableStats(DuckLakeSnapshot snapshot,
+                                                                             const vector<TableIndex> &table_ids) {
+	vector<DuckLakeGlobalStatsInfo> global_stats;
+	bool read_ahead = false;
+	{
+		lock_guard<mutex> guard(read_ahead_lock);
+		if (read_ahead_stats && read_ahead_stats->first == snapshot.snapshot_id) {
+			read_ahead = true;
+			for (auto &table_stats : read_ahead_stats->second) {
+				if (table_ids.empty() ||
+				    std::find(table_ids.begin(), table_ids.end(), table_stats.table_id) != table_ids.end()) {
+					global_stats.push_back(table_stats);
+				}
+			}
+		}
+	}
+	if (!read_ahead) {
+		return DuckLakeMetadataManager::GetGlobalTableStats(snapshot, table_ids);
+	}
+	FillMissingTableSizes(global_stats, [&](string query) { return Query(snapshot, query); });
+	return global_stats;
 }
 
 unique_ptr<QueryResult> PostgresMetadataManager::ExecutePipeline(DuckLakeSnapshot snapshot,

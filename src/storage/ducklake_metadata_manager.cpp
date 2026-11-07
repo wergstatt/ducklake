@@ -1551,7 +1551,7 @@ bool DuckLakeMetadataManager::ResultHasColumn(QueryResult &result, const string 
 }
 
 static string TableStatsQuery(const string &select_list, bool include_column_stats,
-                              const vector<TableIndex> &table_ids = {}) {
+                              const vector<TableIndex> &table_ids = {}, const string &condition = string()) {
 	auto query = "\nSELECT " + select_list + "\nFROM {METADATA_CATALOG}.ducklake_table_stats\n";
 	if (include_column_stats) {
 		query += "LEFT JOIN {METADATA_CATALOG}.ducklake_table_column_stats USING (table_id)\n";
@@ -1562,6 +1562,8 @@ static string TableStatsQuery(const string &select_list, bool include_column_sta
 			ids.push_back(to_string(table_id.index));
 		}
 		query += "WHERE table_id IN (" + StringUtil::Join(ids, ", ") + ")\n";
+	} else if (!condition.empty()) {
+		query += "WHERE " + condition + "\n";
 	}
 	if (include_column_stats) {
 		query += "ORDER BY table_id ASC\n";
@@ -1569,14 +1571,15 @@ static string TableStatsQuery(const string &select_list, bool include_column_sta
 	return query + ";\n";
 }
 
-string DuckLakeMetadataManager::GlobalTableStatsQuery(bool include_exactness, const vector<TableIndex> &table_ids) {
+string DuckLakeMetadataManager::GlobalTableStatsQuery(bool include_exactness, const vector<TableIndex> &table_ids,
+                                                      const string &condition) {
 	string select_list =
 	    "table_id, column_id, record_count, next_row_id, file_size_bytes, contains_null, contains_nan, min_value, "
 	    "max_value, extra_stats";
 	if (include_exactness) {
 		select_list += ", min_is_exact, max_is_exact";
 	}
-	return TableStatsQuery(select_list, true, table_ids);
+	return TableStatsQuery(select_list, true, table_ids, condition);
 }
 
 vector<DuckLakeGlobalStatsInfo> DuckLakeMetadataManager::ParseGlobalTableStats(QueryResult &result) {
@@ -4194,6 +4197,22 @@ bool DuckLakeMetadataManager::InlinedDeletionTableExists(const Identifier &table
 	                                             table_name) != nullptr;
 }
 
+unordered_set<string> DuckLakeMetadataManager::ListedTables(QueryResult &result) {
+	result.ThrowIfError("Failed to probe for DuckLake inlined-deletion table: ");
+	unordered_set<string> listed;
+	for (auto &row : result) {
+		listed.insert(row.GetValue<string>(0));
+	}
+	return listed;
+}
+
+bool DuckLakeMetadataManager::InlinedDeletionTableListed(const Identifier &table_name, string list_query) {
+	// keyed by the newest snapshot of the transaction, which a catalog attached at an older snapshot can read too
+	auto tables = transaction.GetCatalog().GetInlinedDeletionTables(transaction.GetNewestVisibleSnapshotId(),
+	                                                                [&]() { return ListedTables(*Query(list_query)); });
+	return tables->count(table_name.GetIdentifierName()) > 0;
+}
+
 Identifier DuckLakeMetadataManager::GetInlinedDeletionTableName(TableIndex table_id, DuckLakeSnapshot snapshot,
                                                                 bool include_local_changes) {
 	// The table name is always deterministic
@@ -5185,9 +5204,13 @@ string DuckLakeMetadataManager::GetLatestSnapshotQuery() const {
 
 unique_ptr<DuckLakeSnapshot> DuckLakeMetadataManager::GetSnapshot() {
 	auto result = Query(GetLatestSnapshotQuery());
-	result->ThrowIfError("Failed to query most recent snapshot for DuckLake: ");
+	return ParseLatestSnapshot(*result);
+}
+
+unique_ptr<DuckLakeSnapshot> DuckLakeMetadataManager::ParseLatestSnapshot(QueryResult &result) {
+	result.ThrowIfError("Failed to query most recent snapshot for DuckLake: ");
 	string catalog_version;
-	auto snapshot = ParseSnapshot(*result, &catalog_version);
+	auto snapshot = ParseSnapshot(result, &catalog_version);
 	if (!snapshot) {
 		throw InvalidInputException("No snapshot found in DuckLake");
 	}

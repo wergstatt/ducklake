@@ -348,8 +348,9 @@ public:
 	//! Both used by the regular metadata-manager methods and by server-side commit, which runs the
 	//! SQL on a fresh Connection without going through the metadata-manager wrapper.
 	static string LatestSnapshotQuery();
-	//! With table ids only those tables' stats are read
-	static string GlobalTableStatsQuery(bool include_exactness, const vector<TableIndex> &table_ids = {});
+	//! With table ids only those tables' stats are read, else those of every table that meet the condition
+	static string GlobalTableStatsQuery(bool include_exactness, const vector<TableIndex> &table_ids = {},
+	                                    const string &condition = string());
 	//! Pure parsers for the results of the above queries.
 	static unique_ptr<DuckLakeSnapshot> ParseSnapshot(QueryResult &result,
 	                                                  optional_ptr<string> catalog_version = nullptr);
@@ -583,6 +584,8 @@ public:
 	virtual string GetSnapshotAndStatsAndChangesQuery(DuckLakeSnapshot snapshot, bool include_exactness) const;
 	static SnapshotChangeInfo ParseSnapshotAndStatsAndChanges(QueryResult &result, SnapshotAndStats &current_snapshot);
 	virtual unique_ptr<DuckLakeSnapshot> GetSnapshot();
+	//! The snapshot of a result of the latest snapshot query, which must be of the attached catalog version
+	unique_ptr<DuckLakeSnapshot> ParseLatestSnapshot(QueryResult &result);
 	//! Throws when the newest expired snapshot a time travel by timestamp could see is its resolved snapshot or newer
 	void CheckSnapshotAfterExpiredGap(const DuckLakeSnapshot &snapshot, const Value &timestamp,
 	                                  idx_t newest_snapshot_id, const set<idx_t> &expired_in_transaction);
@@ -733,6 +736,10 @@ protected:
 	string GetColumnType(const DuckLakeColumnInfo &col);
 	string GetColumnDefinitions(const vector<DuckLakeColumnInfo> &columns);
 	string GetKnownFilesForCleanupQuery() const;
+	//! Whether the table is among the inlined deletion tables that the query lists, listed once per snapshot
+	bool InlinedDeletionTableListed(const Identifier &table_name, string list_query);
+	//! The names a listing of tables returned
+	static unordered_set<string> ListedTables(QueryResult &result);
 
 	//! Optimized data file writing using DuckDB Appender API (DuckDB and SQLite metadata managers)
 	string WriteNewDataFilesWithAppender(DuckLakeSnapshot &commit_snapshot, const vector<DuckLakeFileInfo> &new_files,

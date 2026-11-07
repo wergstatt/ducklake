@@ -90,6 +90,19 @@ struct DuckLakeTableNetRowCountCacheEntry : public ObjectCacheEntry {
 	}
 };
 
+//! What a DuckLake cached of the snapshots it read, each invalid when it cached nothing of that kind
+struct DuckLakeCachedReadKeys {
+	//! The newest schema version whose schema is cached, and the number of its tables
+	optional_idx schema_version;
+	idx_t table_count = 0;
+	//! The schema version at which the schema versions of every table were cached
+	optional_idx table_schema_versions;
+	//! The snapshot at which the stats of every table were cached
+	optional_idx table_stats;
+	//! The newest snapshot at which the inlined deletion tables were listed
+	optional_idx inlined_deletion_tables;
+};
+
 //! Cached record counts for a snapshot
 struct DuckLakeTableRecordCountCacheEntry : public ObjectCacheEntry {
 	static constexpr idx_t ESTIMATED_BYTES_PER_TABLE = 64;
@@ -446,6 +459,10 @@ public:
 
 	//! The schema versions of the table at the snapshot of the transaction
 	DuckLakeTableSchemaVersions GetTableSchemaVersions(DuckLakeTransaction &transaction, TableIndex table_id);
+	//! Caches the begin snapshot of every schema version of every table, which are all at the latest snapshot
+	void CacheTableSchemaVersions(idx_t schema_version, const map<TableIndex, map<idx_t, idx_t>> &begin_snapshots);
+	//! What this DuckLake cached of the snapshots it read
+	DuckLakeCachedReadKeys GetCachedReadKeys();
 	//! Look up the cached begin snapshot of a (table, schema version) pair, if it has been resolved before
 	optional_idx TryGetSchemaVersionBeginSnapshot(TableIndex table_id, idx_t schema_version);
 	//! Cache the begin snapshot of a committed (table, schema version) pair. The row that backs it is written
@@ -529,6 +546,9 @@ private:
 	//! The schema and record count entries this DuckLake put in the object cache, an expired one was evicted
 	unordered_map<string, weak_ptr<ObjectCacheEntry>> cache_entries;
 	vector<TrackedStatsEntry> stats_cache_entries;
+	//! The newest schema version this DuckLake loaded, and the newest snapshot it read the stats of every table at
+	optional_idx newest_loaded_schema_version;
+	optional_idx newest_stats_snapshot;
 	//! The number of tracked entries at which the evicted ones are forgotten
 	idx_t cache_entries_prune_size = 64;
 	idx_t stats_cache_entries_prune_size = 512;
@@ -561,6 +581,8 @@ private:
 	set<pair<idx_t, idx_t>> columns_with_values;
 	//! The schema versions of each table at the schema version they were looked up at, guarded by the same lock
 	unordered_map<idx_t, pair<idx_t, DuckLakeTableSchemaVersions>> table_schema_versions;
+	//! The schema version at which the schema versions of every table were cached
+	optional_idx cached_table_schema_versions;
 	//! The id of the last committed snapshot, set at FlushChanges on a successful commit
 	mutable mutex commit_lock;
 	optional_idx last_committed_snapshot;

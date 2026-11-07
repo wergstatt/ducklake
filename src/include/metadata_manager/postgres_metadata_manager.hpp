@@ -54,6 +54,11 @@ public:
 	using DuckLakeMetadataManager::Query;
 	vector<unique_ptr<QueryResult>> Query(DuckLakeSnapshot snapshot, const DuckLakeReadBatch &batch) override;
 	DuckLakeCatalogInfo GetCatalogForSnapshot(DuckLakeSnapshot snapshot) override;
+	vector<DuckLakeGlobalStatsInfo> GetGlobalTableStats(DuckLakeSnapshot snapshot,
+	                                                    const vector<TableIndex> &table_ids) override;
+	using DuckLakeMetadataManager::GetSnapshot;
+	//! Reads the latest snapshot together with each read that the caches miss for it, in one round trip
+	unique_ptr<DuckLakeSnapshot> GetSnapshot() override;
 
 	void ClearCache() override;
 	//! postgres_scanner looks up a table it has not cached
@@ -84,9 +89,21 @@ private:
 	                                        bool keep_results = false);
 	//! Runs the reads in one round trip, and returns a query that scans the kept result of each
 	vector<string> KeepResults(DuckLakeSnapshot snapshot, const DuckLakeReadBatch &batch);
+	//! Builds the catalog from the kept results of the reads of its tables
+	DuckLakeCatalogInfo BuildCatalog(DuckLakeSnapshot snapshot, const vector<string> &tables,
+	                                 const vector<string> &scans);
+	//! The query that lists the inlined deletion tables
+	string InlinedDeletionTablesQuery() const;
 
 	//! The queries of the last Execute, one of which the scanner repeats in front of a server error
 	vector<string> executed_queries;
+	//! The stats of every table are read with the snapshot for a catalog of at most this many tables
+	static constexpr idx_t MAX_TABLES_WITH_STATS_READ_AHEAD = 100;
+	mutex read_ahead_lock;
+	//! The catalog read with the snapshot, until it is loaded, and its schema version
+	unique_ptr<pair<idx_t, DuckLakeCatalogInfo>> read_ahead_catalog;
+	//! The stats of every table read with the snapshot, and its snapshot id
+	unique_ptr<pair<idx_t, vector<DuckLakeGlobalStatsInfo>>> read_ahead_stats;
 };
 
 } // namespace duckdb
