@@ -558,6 +558,8 @@ public:
 	                                      const DuckLakeSnapshotCommit &commit_info);
 	static string UpdateGlobalTableStatsSql(const DuckLakeGlobalStatsInfo &stats, bool write_stats_exactness);
 	static string InsertTableColumnStatsSql(const DuckLakeGlobalStatsInfo &stats, bool write_stats_exactness);
+	//! Turns written stats into those that GetGlobalTableStats reads back, returns false when it cannot
+	static bool TryGetStoredGlobalTableStats(DuckLakeGlobalStatsInfo &stats, bool write_stats_exactness);
 	//! Set the stored table sizes to the size of the live data files, and the known record counts of the given tables
 	//! to the rows of the live data files
 	static string RefreshTableSizesSql(const set<TableIndex> &table_ids, const set<TableIndex> &record_count_tables);

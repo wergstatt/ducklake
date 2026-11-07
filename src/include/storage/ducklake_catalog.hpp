@@ -58,6 +58,8 @@ struct DuckLakeTableStatsCacheEntry : public ObjectCacheEntry {
 
 	//! Schema version that stamped the stats types
 	idx_t schema_version;
+	//! The snapshot of the commit that wrote the stats, the only snapshot they are known for
+	optional_idx snapshot_id;
 	DuckLakeTableStats stats;
 	bool has_stats;
 
@@ -458,6 +460,8 @@ public:
 	void AdvanceColumnsWithValues(idx_t snapshot_id);
 	void ForgetColumnsWithValues(const set<TableIndex> &table_ids);
 
+	//! Caches the stats that a commit wrote, for its snapshot
+	void CacheCommittedTableStats(DuckLakeSnapshot committed, DuckLakeStats &stats);
 	//! Invalidate the cached table stats entry for a given stats cache key.
 	void InvalidateTableStatsCache(idx_t next_file_id, TableIndex table_id);
 	//! Invalidate the cached table stats entries of this DuckLake for the given next file ids.

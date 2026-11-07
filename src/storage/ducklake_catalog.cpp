@@ -1051,7 +1051,8 @@ shared_ptr<DuckLakeTableStats> DuckLakeCatalog::GetTableStats(DuckLakeTransactio
 	auto &cache = GetObjectCacheInstance();
 	auto key = StatsCacheKey(snapshot.next_file_id, table_id);
 	auto cached = cache.Get<DuckLakeTableStatsCacheEntry>(key);
-	if (cached && cached->schema_version == snapshot.schema_version) {
+	if (cached && cached->schema_version == snapshot.schema_version &&
+	    (!cached->snapshot_id.IsValid() || cached->snapshot_id.GetIndex() == snapshot.snapshot_id)) {
 		if (!cached->has_stats) {
 			// cached negative result
 			return nullptr;
@@ -1603,6 +1604,18 @@ string DuckLakeCatalog::NetRowCountCacheKey(TableIndex table_id) const {
 string DuckLakeCatalog::SchemaCacheKey(idx_t schema_version) const {
 	// a loaded schema holds the name of the DuckLake, its macros for one, so a new name loads it again
 	return StringUtil::Format("ducklake:%s:%s:schema:%llu", instance_id, GetName(), schema_version);
+}
+
+void DuckLakeCatalog::CacheCommittedTableStats(DuckLakeSnapshot committed, DuckLakeStats &stats) {
+	vector<pair<TableIndex, shared_ptr<ObjectCacheEntry>>> entries;
+	for (auto &table_stats : stats.table_stats) {
+		auto entry =
+		    make_shared_ptr<DuckLakeTableStatsCacheEntry>(committed.schema_version, std::move(*table_stats.second));
+		// a later commit can change the stats without changing the next file id, by dropping files
+		entry->snapshot_id = committed.snapshot_id;
+		entries.emplace_back(table_stats.first, std::move(entry));
+	}
+	PutStatsCacheEntries(committed.next_file_id, std::move(entries));
 }
 
 void DuckLakeCatalog::InvalidateTableStatsCache(idx_t next_file_id, TableIndex table_id) {

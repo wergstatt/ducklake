@@ -1879,6 +1879,9 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 	context.invalidate_table_stats_cache = [&](idx_t next_file_id, TableIndex table_id) {
 		ducklake_catalog.InvalidateTableStatsCache(next_file_id, table_id);
 	};
+	context.cache_committed_table_stats = [&](DuckLakeSnapshot committed, vector<DuckLakeGlobalStatsInfo> &stats) {
+		ducklake_catalog.CacheCommittedTableStats(committed, *context.build_stats_map(stats));
+	};
 	context.report_post_commit_error = [&](const string &message) {
 		ReportPostCommitError(message);
 	};

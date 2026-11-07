@@ -1286,15 +1286,26 @@ static optional_ptr<DuckLakeTableStats> GetCurrentTableStats(TableIndex table_id
 }
 
 static string WriteGlobalTableStatsSql(TableIndex table_id, DuckLakeNewGlobalStats &new_globals,
-                                       bool clear_column_stats, const DuckLakeCommitContext &context) {
+                                       optional_ptr<DuckLakeTableStats> current_stats, bool clear_column_stats,
+                                       const DuckLakeCommitContext &context,
+                                       map<TableIndex, DuckLakeGlobalStatsInfo> &written_stats) {
 	if (clear_column_stats) {
 		new_globals.stats.column_stats.clear();
 	}
-	auto result = DuckLakeMetadataManager::UpdateGlobalTableStatsSql(
-	    DuckLakeTransaction::ConvertNewGlobalStats(table_id, new_globals), context.supports_v1_1_metadata);
+	auto stats = DuckLakeTransaction::ConvertNewGlobalStats(table_id, new_globals);
+	auto result = DuckLakeMetadataManager::UpdateGlobalTableStatsSql(stats, context.supports_v1_1_metadata);
 	if (clear_column_stats) {
 		result += DeleteTableColumnStatsSql(table_id);
 	}
+	if (current_stats) {
+		// the update leaves a column without a stats row without one
+		auto has_no_row = [&](const DuckLakeGlobalColumnStatsInfo &column_stats) {
+			return current_stats->column_stats.find(column_stats.column_id) == current_stats->column_stats.end();
+		};
+		stats.column_stats.erase(std::remove_if(stats.column_stats.begin(), stats.column_stats.end(), has_no_row),
+		                         stats.column_stats.end());
+	}
+	written_stats[table_id] = std::move(stats);
 	return result;
 }
 
@@ -1375,7 +1386,8 @@ string DuckLakeTransactionState::UpdateStatsForDroppedFiles(
 		DuckLakeNewGlobalStats new_globals;
 		InitializeGlobalStats(table_id, *current_stats, new_globals);
 		bool delete_column_stats = ApplyDroppedFileStats(table_id, new_globals, attempt_dropped_file_stats);
-		result += WriteGlobalTableStatsSql(table_id, new_globals, delete_column_stats, context);
+		result += WriteGlobalTableStatsSql(table_id, new_globals, current_stats, delete_column_stats, context,
+		                                   committed_table_stats);
 	}
 	return result;
 }
@@ -1665,7 +1677,8 @@ NewDataInfo DuckLakeTransactionState::GetNewDataFiles(
 			}
 		}
 		// update the global stats for this table based on the newly written data
-		batch_query += WriteGlobalTableStatsSql(table_id, new_globals, clear_column_stats, context);
+		batch_query += WriteGlobalTableStatsSql(table_id, new_globals, current_stats, clear_column_stats, context,
+		                                        committed_table_stats);
 	}
 	return result;
 }
@@ -2221,6 +2234,7 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
 	committed_table_options.clear();
 	added_field_stats.clear();
 	refreshed_table_sizes.clear();
+	committed_table_stats.clear();
 	set<TableIndex> refreshed_record_counts;
 	auto &commit_snapshot = commit_state.commit_snapshot;
 
@@ -2935,6 +2949,20 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 	// a compaction without new files keeps the next file id of the cached stats
 	for (auto &table_id : local_changes.GetCompactedTables()) {
 		context.invalidate_table_stats_cache(commit_snapshot.next_file_id, table_id);
+	}
+	// a first attempt directly follows the snapshot of the stats it read, and keeps its schema without schema changes
+	if (!stats && !SchemaChangesMade()) {
+		vector<DuckLakeGlobalStatsInfo> stored_stats;
+		for (auto &entry : committed_table_stats) {
+			// the batch computes the size of these tables
+			if (refreshed_table_sizes.find(entry.first) == refreshed_table_sizes.end() &&
+			    DuckLakeMetadataManager::TryGetStoredGlobalTableStats(entry.second, context.supports_v1_1_metadata)) {
+				stored_stats.push_back(std::move(entry.second));
+			}
+		}
+		if (!stored_stats.empty()) {
+			context.cache_committed_table_stats(commit_snapshot, stored_stats);
+		}
 	}
 	if (flushed_inlined && !context.skip_drop_empty_inlined) {
 		try {
