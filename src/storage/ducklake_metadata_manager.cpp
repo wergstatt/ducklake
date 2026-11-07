@@ -2449,9 +2449,9 @@ string DuckLakeMetadataManager::GenerateFileListQuery(DuckLakeTableEntry &table,
 		              ", data.row_id_start, data.mapping_id, " + GetDeleteFileSelectList("del") +
 		              ", del.begin_snapshot";
 	} else {
-		select_list = "data.data_file_id, " + GetDataFileSelectList("data") +
+		select_list = "data.data_file_id, del.delete_file_id, data.record_count, " + GetDataFileSelectList("data") +
 		              ", data.row_id_start, data.begin_snapshot, data.partial_max, data.mapping_id, " +
-		              GetDeleteFileSelectList("del") + stats_select_list;
+		              GetDeleteFileSelectList("del") + ", del.begin_snapshot" + stats_select_list;
 	}
 
 	// Add base query
@@ -2515,6 +2515,11 @@ vector<DuckLakeFileListEntry> DuckLakeMetadataManager::GetFilesForTable(DuckLake
 		DuckLakeFileListEntry file_entry;
 		idx_t col_idx = 0;
 		file_entry.file_id = DataFileIndex(row.GetValue<idx_t>(col_idx++));
+		if (!row.IsNull(col_idx)) {
+			file_entry.delete_file_id = DataFileIndex(row.GetValue<idx_t>(col_idx));
+		}
+		col_idx++;
+		file_entry.row_count = row.GetValue<idx_t>(col_idx++);
 		file_entry.file = ReadDataFile(table, row, col_idx, IsEncrypted());
 		file_entry.row_id_start = OptIdx(row, col_idx++);
 		file_entry.snapshot_id = row.GetValue<idx_t>(col_idx++);
@@ -2528,6 +2533,7 @@ vector<DuckLakeFileListEntry> DuckLakeMetadataManager::GetFilesForTable(DuckLake
 		}
 		col_idx++;
 		file_entry.delete_file = ReadDeleteFile(table, row, col_idx, IsEncrypted());
+		file_entry.delete_file_begin_snapshot = OptIdx(row, col_idx++);
 		for (auto &column_field_index : runtime_filter_stats_columns) {
 			DuckLakeFileColumnStats column_stats;
 			column_stats.has_min = TryReadValue(row, col_idx++, column_stats.min);

@@ -1,0 +1,38 @@
+# name: test/sql/delete/delete_reads_file_list_once.test
+# description: A DELETE and an UPDATE read the file list of the table once each
+# group: [delete]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/delete_reads_file_list_once', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE dl.t AS SELECT r AS i FROM range(3) _(r)
+
+statement ok
+CALL enable_logging('DuckLakeMetadata')
+
+statement ok
+DELETE FROM dl.t WHERE i = 1
+
+# the file has a delete file now, which the update rewrites
+statement ok
+UPDATE dl.t SET i = 20 WHERE i = 2
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE query LIKE '%del ON del.data_file_id = data.data_file_id%'
+----
+2
+
+query I rowsort
+SELECT i FROM dl.t
+----
+0
+20

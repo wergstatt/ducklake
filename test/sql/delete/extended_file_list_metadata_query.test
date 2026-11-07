@@ -54,7 +54,7 @@ SELECT lower(regexp_replace(query, '\s+', '', 'g')) AS query
 FROM duckdb_logs_parsed('DuckLakeMetadata')
 WHERE lower(regexp_replace(query, '\s+', '', 'g')) LIKE '%selectdata.data_file_id,del.delete_file_id,data.record_count,%'
 
-# Match the extended projection specifically; a pushed-down ordinary scan must not satisfy this check.
+# The delete reads one file list: the scan's, which has the columns the delete needs.
 query I
 SELECT count(*) FROM extended_queries
 ----
