@@ -721,6 +721,8 @@ protected:
 	string GetColumnType(const DuckLakeColumnInfo &col);
 	string GetColumnDefinitions(const vector<DuckLakeColumnInfo> &columns);
 	string GetKnownFilesForCleanupQuery() const;
+	//! Whether the table is among the inlined deletion tables that the query lists, listed once per snapshot
+	bool InlinedDeletionTableListed(const Identifier &table_name, string list_query);
 
 	//! Optimized data file writing using DuckDB Appender API (DuckDB and SQLite metadata managers)
 	string WriteNewDataFilesWithAppender(DuckLakeSnapshot &commit_snapshot, const vector<DuckLakeFileInfo> &new_files,

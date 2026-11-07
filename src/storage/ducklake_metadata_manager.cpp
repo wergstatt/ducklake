@@ -4129,6 +4129,20 @@ bool DuckLakeMetadataManager::InlinedDeletionTableExists(const Identifier &table
 	                                             table_name) != nullptr;
 }
 
+bool DuckLakeMetadataManager::InlinedDeletionTableListed(const Identifier &table_name, string list_query) {
+	// keyed by the newest snapshot of the transaction, which a catalog attached at an older snapshot can read too
+	auto tables = transaction.GetCatalog().GetInlinedDeletionTables(transaction.GetNewestVisibleSnapshotId(), [&]() {
+		auto result = Query(list_query);
+		result->ThrowIfError("Failed to probe for DuckLake inlined-deletion table: ");
+		unordered_set<string> listed;
+		for (auto &row : *result) {
+			listed.insert(row.GetValue<string>(0));
+		}
+		return listed;
+	});
+	return tables->count(table_name.GetIdentifierName()) > 0;
+}
+
 Identifier DuckLakeMetadataManager::GetInlinedDeletionTableName(TableIndex table_id, DuckLakeSnapshot snapshot,
                                                                 bool include_local_changes) {
 	// The table name is always deterministic
