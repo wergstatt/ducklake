@@ -44,6 +44,12 @@ SELECT cache_clears()
 ----
 1
 
+# it sends the statements that create the metadata tables in one request
+query I
+SELECT count(*) FROM duckdb_logs_parsed('PostgresQueryLog') WHERE query LIKE '%CREATE TABLE%'
+----
+1
+
 statement ok
 CREATE TABLE dl.t AS SELECT 42 AS i
 
