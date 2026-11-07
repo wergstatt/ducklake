@@ -1,0 +1,69 @@
+# name: test/sql/cleanup/expire_dropped_table_paths.test
+# description: Expiring dropped tables schedules their files relative to the data path wherever they lie inside it
+# group: [cleanup]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake
+(DATA_PATH '{DATA_PATH}/expire_dropped_table_paths', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE SCHEMA ducklake.outside
+
+statement ok
+CREATE SCHEMA ducklake.inside
+
+# main keeps its relative path, the others get absolute ones outside and inside the data path
+statement ok
+UPDATE __ducklake_metadata_ducklake.ducklake_schema
+SET path = '{DATA_PATH}/expire_dropped_table_paths_outside/', path_is_relative = false
+WHERE schema_name = 'outside'
+
+statement ok
+UPDATE __ducklake_metadata_ducklake.ducklake_schema
+SET path = '{DATA_PATH}/expire_dropped_table_paths/inside/', path_is_relative = false
+WHERE schema_name = 'inside'
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake
+(DATA_PATH '{DATA_PATH}/expire_dropped_table_paths', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE ducklake.main.t AS SELECT 1 AS i
+
+statement ok
+CREATE TABLE ducklake.outside.t AS SELECT 1 AS i
+
+statement ok
+CREATE TABLE ducklake.inside.t AS SELECT 1 AS i
+
+statement ok
+DROP TABLE ducklake.main.t
+
+statement ok
+DROP TABLE ducklake.outside.t
+
+statement ok
+DROP TABLE ducklake.inside.t
+
+statement ok
+CALL ducklake_expire_snapshots('ducklake', older_than => now())
+
+query II
+SELECT path_is_relative, replace(parse_dirpath(path), '{DATA_PATH}', 'DATA_PATH')
+FROM __ducklake_metadata_ducklake.ducklake_files_scheduled_for_deletion
+ORDER BY ALL
+----
+false	DATA_PATH/expire_dropped_table_paths_outside/t
+true	inside/t
+true	main/t
