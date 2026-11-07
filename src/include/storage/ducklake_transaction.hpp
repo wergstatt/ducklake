@@ -62,6 +62,12 @@ struct FlushedInlinedTableInfo {
 	bool wrote_files = true;
 };
 
+//! An inlined data table that one of a newer schema version of its table supersedes
+struct SupersededInlinedTableInfo {
+	TableIndex table_id;
+	DuckLakeInlinedTableInfo inlined_table;
+};
+
 struct DroppedDataFileStats {
 	idx_t row_count = 0;
 	idx_t file_size_bytes = 0;
@@ -296,6 +302,8 @@ public:
 	void MarkMetadataWritten();
 	//! Marks the inlined data flushed up to the snapshot, the commit deletes its rows
 	void MarkInlinedDataForDeletion(DuckLakeInlinedTableInfo inlined_table, idx_t flush_snapshot_id, bool wrote_files);
+	//! Marks a superseded inlined data table that a flush empties, the commit drops it once it is empty
+	void MarkSupersededInlinedTableFlushed(TableIndex table_id, DuckLakeInlinedTableInfo inlined_table);
 	bool InlinedTableFlushed(const Identifier &table_name);
 	//! Marks the inlined file deletions of the table flushed up to the snapshot, the commit deletes them
 	void MarkInlinedFileDeletionsFlushed(TableIndex table_id, idx_t flush_snapshot_id);

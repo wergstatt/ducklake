@@ -2675,40 +2675,21 @@ void DuckLakeTransactionState::CheckFileConflicts(const TransactionChangeInforma
 	}
 }
 
-void DuckLakeTransactionState::DropEmptySupersededInlinedTables(const DuckLakeCommitContext &context) {
-	// Superseded inlined tables.
-	string find_targets_sql = R"(
-SELECT idt.table_id, idt.schema_version, idt.table_name
-FROM {METADATA_CATALOG}.ducklake_inlined_data_tables idt
-WHERE idt.schema_version < (
-    SELECT MAX(idt2.schema_version)
-    FROM {METADATA_CATALOG}.ducklake_inlined_data_tables idt2
-    WHERE idt2.table_id = idt.table_id
-);)";
-	auto targets = context.query_metadata(find_targets_sql);
-	targets->ThrowIfError("Failed to identify superseded inlined-data tables in DuckLake: ");
-	// Collect candidates before issuing the per-table emptiness queries on the same connection.
-	struct SupersededInlinedTable {
-		idx_t table_id;
-		idx_t schema_version;
-		Identifier table_name;
-	};
-	vector<SupersededInlinedTable> candidates;
-	for (auto &row : *targets) {
-		candidates.push_back({row.GetValue<idx_t>(0), row.GetValue<idx_t>(1), row.GetValue<Identifier>(2)});
-	}
+void DuckLakeTransactionState::DropEmptySupersededInlinedTables(const DuckLakeCommitContext &context,
+                                                                const vector<SupersededInlinedTableInfo> &candidates) {
 	bool dropped = false;
 	unique_ptr<QueryResult> failed_drop;
 	for (auto &candidate : candidates) {
+		auto &inlined_table = candidate.inlined_table;
 		auto rows_result =
-		    context.query_metadata(DuckLakeMetadataManager::InlinedTableHasRowsQuery(candidate.table_name));
+		    context.query_metadata(DuckLakeMetadataManager::InlinedTableHasRowsQuery(inlined_table.table_name));
 		rows_result->ThrowIfError("Failed to check emptiness of superseded inlined-data table in DuckLake: ");
 		if (rows_result->begin() != rows_result->end()) {
 			continue;
 		}
 		// keep the registration if the drop fails
 		auto res = context.execute_in_transaction(DuckLakeMetadataManager::DropInlinedTableSql(
-		    candidate.table_id, candidate.schema_version, candidate.table_name));
+		    candidate.table_id.index, inlined_table.schema_version, inlined_table.table_name));
 		if (res->HasError()) {
 			if (!failed_drop) {
 				failed_drop = std::move(res);
@@ -2938,7 +2919,7 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 	}
 	if (flushed_inlined && !context.skip_drop_empty_inlined) {
 		try {
-			DropEmptySupersededInlinedTables(context);
+			DropEmptySupersededInlinedTables(context, superseded_inlined_tables);
 		} catch (std::exception &ex) {
 			context.report_post_commit_error(ErrorData(ex).Message());
 		}

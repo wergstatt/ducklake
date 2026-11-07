@@ -520,10 +520,18 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, 
 		if (!ducklake_catalog.AutoCompactEnabled(table_entry)) {
 			continue;
 		}
-		for (auto &inlined_table : table_entry.GetInlinedDataTables(transaction, transaction.GetSnapshot())) {
+		auto inlined_tables = table_entry.GetInlinedDataTables(transaction, transaction.GetSnapshot());
+		for (auto &inlined_table : inlined_tables) {
 			DuckLakeDataFlusher flusher(context, ducklake_catalog, transaction, *input.binder, table_entry.GetTableId(),
 			                            inlined_table);
 			flushes.push_back(flusher.GenerateFlushCommand());
+			bool superseded =
+			    std::any_of(inlined_tables.begin(), inlined_tables.end(), [&](const DuckLakeInlinedTableInfo &other) {
+				    return other.schema_version > inlined_table.schema_version;
+			    });
+			if (superseded) {
+				transaction.MarkSupersededInlinedTableFlushed(table_entry.GetTableId(), inlined_table);
+			}
 		}
 		FlushInlinedFileDeletions(context, ducklake_catalog, transaction, table_entry);
 	}

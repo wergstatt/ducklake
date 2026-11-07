@@ -1620,7 +1620,7 @@ void DuckLakeTransaction::DropEmptySupersededInlinedTablesClientSide() {
 		ducklake_catalog.InvalidateSchemaCache(schema_version);
 	};
 	try {
-		DuckLakeTransactionState::DropEmptySupersededInlinedTables(context);
+		DuckLakeTransactionState::DropEmptySupersededInlinedTables(context, state->superseded_inlined_tables);
 	} catch (std::exception &ex) {
 		ReportPostCommitError(ErrorData(ex).Message());
 	}
@@ -2344,6 +2344,12 @@ void DuckLakeTransaction::MarkInlinedDataForDeletion(DuckLakeInlinedTableInfo in
                                                      bool wrote_files) {
 	lock_guard<mutex> guard(flushed_inlined_lock);
 	state->flushed_inlined_tables.push_back({std::move(inlined_table), flush_snapshot_id, wrote_files});
+}
+
+void DuckLakeTransaction::MarkSupersededInlinedTableFlushed(TableIndex table_id,
+                                                            DuckLakeInlinedTableInfo inlined_table) {
+	lock_guard<mutex> guard(flushed_inlined_lock);
+	state->superseded_inlined_tables.push_back({table_id, std::move(inlined_table)});
 }
 
 bool DuckLakeTransaction::InlinedTableFlushed(const Identifier &table_name) {

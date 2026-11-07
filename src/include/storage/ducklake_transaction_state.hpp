@@ -278,7 +278,8 @@ public:
 	static DuckLakeFileInfo GetNewDataFile(const DuckLakeDataFile &file, DuckLakeCommitState &commit_state,
 	                                       TableIndex table_id, optional_idx row_id_start);
 
-	static void DropEmptySupersededInlinedTables(const DuckLakeCommitContext &context);
+	static void DropEmptySupersededInlinedTables(const DuckLakeCommitContext &context,
+	                                             const vector<SupersededInlinedTableInfo> &candidates);
 
 	void CleanupFiles();
 
@@ -314,6 +315,8 @@ public:
 	map<SchemaIndex, reference<DuckLakeSchemaEntry>> dropped_schemas;
 	LocalTableChanges local_changes;
 	vector<FlushedInlinedTableInfo> flushed_inlined_tables;
+	//! The flushed inlined tables that a newer one of their table supersedes
+	vector<SupersededInlinedTableInfo> superseded_inlined_tables;
 	//! The tables whose inlined file deletions were flushed, with the snapshot of the flush
 	map<TableIndex, idx_t> flushed_inlined_file_deletions;
 	vector<DuckLakeConfigOption> committed_table_options;

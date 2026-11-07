@@ -42,6 +42,13 @@ INSERT INTO dl.flushed VALUES (1, 'a')
 statement ok
 CALL ducklake_flush_inlined_data('dl', table_name => 'flushed')
 
+# a fresh attach lists every table of the metadata catalog
+statement ok
+DETACH dl
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/inlined_rename_batches', METADATA_CATALOG 'dlmeta', DUCKLAKE_VERSION '1.0')
+
 statement ok
 CREATE TABLE inlined_columns AS
 SELECT table_name, column_index, column_name, data_type FROM duckdb_columns()
