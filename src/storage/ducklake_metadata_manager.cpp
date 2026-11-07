@@ -1069,18 +1069,6 @@ idx_t DuckLakeMetadataManager::GetNetDataFileRowCount(TableIndex table_id, DuckL
 	// LCOV_EXCL_STOP
 }
 
-optional_idx DuckLakeMetadataManager::GetNetDataFileRowCountForStats(TableIndex table_id, DuckLakeSnapshot snapshot) {
-	auto query = GetNetDataFileRowCountSql(table_id, GetInlinedDeletionTableName(table_id, snapshot), true);
-	auto result = Query(snapshot, query);
-	result->ThrowIfError("Failed to get exact data file row count from DuckLake: ");
-	for (auto &row : *result) {
-		return OptIdx(row, 0);
-	}
-	// LCOV_EXCL_START
-	return optional_idx();
-	// LCOV_EXCL_STOP
-}
-
 string DuckLakeMetadataManager::GetNetInlinedRowCountSql(const Identifier &inlined_table_name,
                                                          const DuckLakeInlinedColNames &col_names) {
 	return StringUtil::Format(R"(
@@ -1102,15 +1090,28 @@ WHERE {SNAPSHOT_ID} >= %s)",
 	                          col_names.begin_snapshot);
 }
 
-idx_t DuckLakeMetadataManager::GetNetInlinedRowCount(const Identifier &inlined_table_name, DuckLakeSnapshot snapshot) {
-	auto result = Query(snapshot, GetNetInlinedRowCountSql(inlined_table_name, InlinedColNames()));
-	CheckInlinedDataReadError(*result, inlined_table_name);
-	for (auto &row : *result) {
-		return row.GetValue<idx_t>(0);
+optional_idx DuckLakeMetadataManager::GetNetRowCount(DuckLakeTableEntry &table, DuckLakeSnapshot snapshot) {
+	auto table_id = table.GetTableId();
+	DuckLakeReadBatch reads;
+	reads.Add({GetNetDataFileRowCountSql(table_id, GetInlinedDeletionTableName(table_id, snapshot), true)});
+	auto inlined_tables = table.GetInlinedDataTables(transaction, snapshot);
+	for (auto &inlined_table : inlined_tables) {
+		reads.Add({GetNetInlinedRowCountSql(inlined_table.table_name, InlinedColNames())});
 	}
-	// LCOV_EXCL_START
-	return 0;
-	// LCOV_EXCL_STOP
+	auto results = Query(snapshot, reads);
+	results[0]->ThrowIfError("Failed to get exact data file row count from DuckLake: ");
+	optional_idx row_count;
+	for (auto &row : *results[0]) {
+		row_count = OptIdx(row, 0);
+	}
+	for (idx_t i = 0; i < inlined_tables.size() && row_count.IsValid(); i++) {
+		auto &result = *results[i + 1];
+		CheckInlinedDataReadError(result, inlined_tables[i].table_name);
+		for (auto &row : result) {
+			row_count = row_count.GetIndex() + row.GetValue<idx_t>(0);
+		}
+	}
+	return row_count;
 }
 
 string DuckLakeMetadataManager::GetTableColumnSchemaSql(TableIndex table_id) {
@@ -3307,6 +3308,15 @@ unique_ptr<QueryResult> DuckLakeMetadataManager::Query(DuckLakeSnapshot snapshot
 unique_ptr<QueryResult> DuckLakeMetadataManager::Query(string &query) {
 	SubstituteCatalogPlaceholders(query);
 	return transaction.ExecuteRaw(query);
+}
+
+vector<unique_ptr<QueryResult>> DuckLakeMetadataManager::Query(DuckLakeSnapshot snapshot,
+                                                               const DuckLakeReadBatch &batch) {
+	vector<unique_ptr<QueryResult>> results;
+	for (auto &read : batch.GetReads()) {
+		results.push_back(Query(snapshot, read.ToSQL()));
+	}
+	return results;
 }
 
 unique_ptr<QueryResult> DuckLakeMetadataManager::Execute(string &&query) {

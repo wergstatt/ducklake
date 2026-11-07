@@ -543,16 +543,6 @@ vector<DuckLakeInlinedTableInfo> DuckLakeTableEntry::GetInlinedDataTables(DuckLa
 	return result;
 }
 
-idx_t DuckLakeTableEntry::GetNetInlinedRowCount(DuckLakeTransaction &transaction) {
-	auto &metadata_manager = transaction.GetMetadataManager();
-	auto snapshot = transaction.GetSnapshot();
-	idx_t total = 0;
-	for (auto &inlined_table : GetInlinedDataTables(transaction, snapshot)) {
-		total += metadata_manager.GetNetInlinedRowCount(inlined_table.table_name, snapshot);
-	}
-	return total;
-}
-
 unique_ptr<CatalogEntry> DuckLakeTableEntry::AlterTable(DuckLakeTransaction &transaction, RenameTableInfo &info) {
 	auto create_info = GetInfo();
 	auto &table_info = create_info->Cast<CreateTableInfo>();
