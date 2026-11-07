@@ -1,0 +1,41 @@
+# name: test/sql/data_inlining/inlined_columns_from_current_table.test
+# description: A scan of an inlined table of an older schema version takes its columns from the current table
+# group: [data_inlining]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/inlined_columns_from_current_table')
+
+statement ok
+CREATE TABLE ducklake.t (a INTEGER)
+
+statement ok
+INSERT INTO ducklake.t VALUES (1)
+
+# a new schema version that leaves t unchanged
+statement ok
+CREATE TABLE ducklake.u (a INTEGER)
+
+statement ok
+CALL enable_logging('DuckLakeMetadata')
+
+query I
+FROM ducklake.t
+----
+1
+
+statement ok
+CALL disable_logging()
+
+# the scan loads the catalog of the current schema version only
+query I
+SELECT count(*) FILTER (WHERE query LIKE '%schema_uuid%') FROM duckdb_logs_parsed('DuckLakeMetadata')
+----
+1
