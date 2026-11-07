@@ -373,6 +373,10 @@ public:
 	//! The global stats of every table of the snapshot, or of the given tables
 	virtual vector<DuckLakeGlobalStatsInfo> GetGlobalTableStats(DuckLakeSnapshot snapshot,
 	                                                            const vector<TableIndex> &table_ids = {});
+	//! Whether the global stats of every table of the snapshot are at hand, so that reading them needs no request
+	virtual bool HoldsGlobalTableStats(DuckLakeSnapshot snapshot) {
+		return false;
+	}
 	//! Get the record count of every table that has global stats
 	virtual map<TableIndex, idx_t> GetTableRecordCounts(DuckLakeSnapshot snapshot);
 	virtual vector<DuckLakeFileListEntry> GetFilesForTable(DuckLakeTableEntry &table, DuckLakeSnapshot snapshot,
@@ -571,6 +575,8 @@ public:
 	                                                 const DuckLakeSnapshotCommit &commit_info);
 	static DuckLakeBatch UpdateGlobalTableStatsSql(const DuckLakeGlobalStatsInfo &stats, bool write_stats_exactness);
 	static DuckLakeBatch InsertTableColumnStatsSql(const DuckLakeGlobalStatsInfo &stats, bool write_stats_exactness);
+	//! Turns written stats into those that GetGlobalTableStats reads back, returns false when it cannot
+	static bool TryGetStoredGlobalTableStats(DuckLakeGlobalStatsInfo &stats, bool write_stats_exactness);
 	//! Set the stored table sizes to the size of the live data files, and the known record counts of the given tables
 	//! to the rows of the live data files
 	static string RefreshTableSizesSql(const set<TableIndex> &table_ids, const set<TableIndex> &record_count_tables);

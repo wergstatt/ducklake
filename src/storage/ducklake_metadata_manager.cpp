@@ -5650,6 +5650,24 @@ DuckLakeBatch DuckLakeMetadataManager::UpdateGlobalTableStatsSql(const DuckLakeG
 	return batch_query;
 }
 
+bool DuckLakeMetadataManager::TryGetStoredGlobalTableStats(DuckLakeGlobalStatsInfo &stats, bool write_stats_exactness) {
+	if (stats.record_count_unknown) {
+		stats.record_count = 0;
+	}
+	for (auto &col_stats : stats.column_stats) {
+		if (col_stats.has_extra_stats) {
+			// the extra stats are stored without the quotes of their literal
+			return false;
+		}
+		auto sql = ColumnStatsSQL::FromColumnStats(col_stats);
+		col_stats.has_min = !sql.min_val.IsNull();
+		col_stats.has_max = !sql.max_val.IsNull();
+		col_stats.min_is_exact = col_stats.min_is_exact && write_stats_exactness;
+		col_stats.max_is_exact = col_stats.max_is_exact && write_stats_exactness;
+	}
+	return true;
+}
+
 string DuckLakeMetadataManager::AddInlinedRowCountsSql(TableIndex table_id,
                                                        const vector<Identifier> &inlined_table_names) {
 	string batch_query;

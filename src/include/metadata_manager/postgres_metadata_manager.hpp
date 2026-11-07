@@ -56,6 +56,7 @@ public:
 	DuckLakeCatalogInfo GetCatalogForSnapshot(DuckLakeSnapshot snapshot) override;
 	vector<DuckLakeGlobalStatsInfo> GetGlobalTableStats(DuckLakeSnapshot snapshot,
 	                                                    const vector<TableIndex> &table_ids) override;
+	bool HoldsGlobalTableStats(DuckLakeSnapshot snapshot) override;
 	using DuckLakeMetadataManager::GetSnapshot;
 	//! Reads the latest snapshot together with each read that the caches miss for it, in one round trip
 	unique_ptr<DuckLakeSnapshot> GetSnapshot() override;

@@ -1063,7 +1063,8 @@ shared_ptr<DuckLakeTableStats> DuckLakeCatalog::GetTableStats(DuckLakeTransactio
 	auto &cache = GetObjectCacheInstance();
 	auto key = StatsCacheKey(snapshot.next_file_id, table_id);
 	auto cached = cache.Get<DuckLakeTableStatsCacheEntry>(key);
-	if (cached && cached->schema_version == snapshot.schema_version) {
+	if (cached && cached->schema_version == snapshot.schema_version &&
+	    (!cached->snapshot_id.IsValid() || cached->snapshot_id.GetIndex() == snapshot.snapshot_id)) {
 		if (!cached->has_stats) {
 			// cached negative result
 			return nullptr;
@@ -1077,6 +1078,10 @@ shared_ptr<DuckLakeTableStats> DuckLakeCatalog::GetTableStats(DuckLakeTransactio
 	if (table_map.find(table_id) == table_map.end()) {
 		// a table that is not part of the snapshot, e.g. one created in this transaction, has no stats in it
 		return nullptr;
+	}
+	// stats of every table at hand are cached for every table, which lets a commit keep them for its snapshot
+	if (load_tables && transaction.GetMetadataManager().HoldsGlobalTableStats(snapshot)) {
+		load_tables = nullptr;
 	}
 	// one query for the whole snapshot or for the given tables, caching the tables without stats as well
 	vector<TableIndex> cache_tables;
@@ -1659,6 +1664,63 @@ string DuckLakeCatalog::NetRowCountCacheKey(TableIndex table_id) const {
 string DuckLakeCatalog::SchemaCacheKey(idx_t schema_version) const {
 	// a loaded schema holds the name of the DuckLake, its macros for one, so a new name loads it again
 	return StringUtil::Format("ducklake:%s:%s:schema:%llu", instance_id, GetName(), schema_version);
+}
+
+void DuckLakeCatalog::CacheCommittedTableStats(DuckLakeSnapshot committed, DuckLakeStats &stats) {
+	vector<pair<TableIndex, shared_ptr<ObjectCacheEntry>>> entries;
+	for (auto &table_stats : stats.table_stats) {
+		auto entry =
+		    make_shared_ptr<DuckLakeTableStatsCacheEntry>(committed.schema_version, std::move(*table_stats.second));
+		// a later commit can change the stats without changing the next file id, by dropping files
+		entry->snapshot_id = committed.snapshot_id;
+		entries.emplace_back(table_stats.first, std::move(entry));
+	}
+	PutStatsCacheEntries(committed.next_file_id, std::move(entries));
+}
+
+//! Whether a cached stats entry holds the stats at the snapshot
+static bool StatsCachedAt(const shared_ptr<DuckLakeTableStatsCacheEntry> &entry, DuckLakeSnapshot snapshot) {
+	return entry && entry->schema_version == snapshot.schema_version &&
+	       (!entry->snapshot_id.IsValid() || entry->snapshot_id.GetIndex() == snapshot.snapshot_id);
+}
+
+void DuckLakeCatalog::KeepTableStats(DuckLakeSnapshot previous, DuckLakeSnapshot committed,
+                                     const set<TableIndex> &changed_tables) {
+	{
+		lock_guard<mutex> guard(cache_entries_lock);
+		if (committed.snapshot_id != previous.snapshot_id + 1 || committed.schema_version != previous.schema_version ||
+		    !newest_stats_snapshot.IsValid() || newest_stats_snapshot.GetIndex() != previous.snapshot_id) {
+			return;
+		}
+	}
+	auto &cache = GetObjectCacheInstance();
+	auto schema = cache.Get<DuckLakeSchemaCacheEntry>(SchemaCacheKey(previous.schema_version));
+	if (!schema) {
+		return;
+	}
+	vector<pair<TableIndex, shared_ptr<ObjectCacheEntry>>> entries;
+	for (auto &table : schema->catalog_set.GetTableIdMap()) {
+		if (changed_tables.find(table.first) != changed_tables.end()) {
+			// the commit cached the stats it wrote
+			auto kept = cache.Get<DuckLakeTableStatsCacheEntry>(StatsCacheKey(committed.next_file_id, table.first));
+			if (!StatsCachedAt(kept, committed)) {
+				return;
+			}
+			continue;
+		}
+		auto cached = cache.Get<DuckLakeTableStatsCacheEntry>(StatsCacheKey(previous.next_file_id, table.first));
+		if (!StatsCachedAt(cached, previous)) {
+			return;
+		}
+		auto entry = cached->has_stats
+		                 ? make_shared_ptr<DuckLakeTableStatsCacheEntry>(committed.schema_version, cached->stats)
+		                 : make_shared_ptr<DuckLakeTableStatsCacheEntry>(committed.schema_version);
+		entry->snapshot_id = committed.snapshot_id;
+		entries.emplace_back(table.first, std::move(entry));
+	}
+	PutStatsCacheEntries(committed.next_file_id, std::move(entries));
+	lock_guard<mutex> guard(cache_entries_lock);
+	newest_stats_snapshot = Newest(newest_stats_snapshot, committed.snapshot_id);
 }
 
 void DuckLakeCatalog::InvalidateTableStatsCache(idx_t next_file_id, TableIndex table_id) {

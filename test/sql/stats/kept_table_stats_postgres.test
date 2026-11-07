@@ -1,0 +1,65 @@
+# name: test/sql/stats/kept_table_stats_postgres.test
+# description: on PostgreSQL an insert reads the stats of another writer's commit with the snapshot, and a commit keeps the stats of the tables it did not change, so a lone writer reads none again
+# group: [stats]
+
+require ducklake
+
+require parquet
+
+require postgres_scanner
+
+require-env DUCKLAKE_CONNECTION postgres:dbname=ducklakedb
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/kept_table_stats_postgres', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS other (DATA_PATH '{DATA_PATH}/kept_table_stats_postgres', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE dl.t (i INTEGER)
+
+statement ok
+CREATE TABLE dl.u (i INTEGER)
+
+statement ok
+INSERT INTO dl.u VALUES (1)
+
+statement ok
+INSERT INTO other.t VALUES (1)
+
+statement ok
+CALL enable_logging('DuckLakeMetadata', storage = 'memory')
+
+statement ok
+INSERT INTO dl.t VALUES (2)
+
+statement ok
+CALL disable_logging()
+
+# the stats come with the snapshot, in no request of their own
+query I
+SELECT count(*) = 0 OR NOT EXISTS (SELECT 1 FROM duckdb_functions() WHERE function_name = 'postgres_pipeline_result')
+FROM duckdb_logs_parsed('DuckLakeMetadata')
+WHERE regexp_matches(query, 'SELECT\s+table_id,\s*column_id,\s*record_count') AND NOT contains(query, 'SELECT snapshot_id')
+----
+true
+
+query I
+SELECT max(i) FROM dl.u
+----
+1
+
+statement ok
+INSERT INTO dl.t VALUES (3)
+
+# stats changed without a snapshot show whether a statement reads them again
+statement ok
+UPDATE __ducklake_metadata_dl.ducklake_table_column_stats SET max_value = '999'
+
+query I
+SELECT stats(i)::VARCHAR LIKE '%999%' FROM dl.u LIMIT 1
+----
+false

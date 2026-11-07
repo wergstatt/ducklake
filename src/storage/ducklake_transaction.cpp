@@ -1630,6 +1630,19 @@ void DuckLakeTransaction::ReportPostCommitError(const string &message) {
 	DUCKDB_LOG_WARNING(db, StringUtil::Format("DuckLake post-commit cleanup failed: %s", message));
 }
 
+//! The tables whose stats a commit of the changes can change, apart from deletes, which change them only by dropping
+//! files, given in the written tables
+static set<TableIndex> TablesWithChangedStats(const TransactionChangeInformation &changes,
+                                              const set<TableIndex> &written_tables) {
+	set<TableIndex> result(written_tables);
+	for (auto tables : {&changes.altered_tables, &changes.dropped_tables, &changes.tables_inserted_into,
+	                    &changes.tables_inserted_inlined, &changes.tables_flushed_inlined, &changes.tables_compacted,
+	                    &changes.tables_merge_adjacent, &changes.tables_rewrite_delete}) {
+		result.insert(tables->begin(), tables->end());
+	}
+	return result;
+}
+
 void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
                                         const TransactionChangeInformation &transaction_changes,
                                         const DuckLakeRetryConfig &retry_config) {
@@ -1879,6 +1892,15 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 	};
 	context.invalidate_table_stats_cache = [&](idx_t next_file_id, TableIndex table_id) {
 		ducklake_catalog.InvalidateTableStatsCache(next_file_id, table_id);
+	};
+	context.cache_committed_table_stats = [&](DuckLakeSnapshot committed, vector<DuckLakeGlobalStatsInfo> &stats,
+	                                          const set<TableIndex> &written_tables) {
+		if (!stats.empty()) {
+			// building the stats map needs the catalog, which a commit without stats may not have loaded
+			ducklake_catalog.CacheCommittedTableStats(committed, *context.build_stats_map(stats));
+		}
+		ducklake_catalog.KeepTableStats(transaction_snapshot, committed,
+		                                TablesWithChangedStats(transaction_changes, written_tables));
 	};
 	context.report_post_commit_error = [&](const string &message) {
 		ReportPostCommitError(message);

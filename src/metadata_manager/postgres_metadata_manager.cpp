@@ -759,6 +759,11 @@ vector<DuckLakeGlobalStatsInfo> PostgresMetadataManager::GetGlobalTableStats(Duc
 	return global_stats;
 }
 
+bool PostgresMetadataManager::HoldsGlobalTableStats(DuckLakeSnapshot snapshot) {
+	lock_guard<mutex> guard(read_ahead_lock);
+	return read_ahead_stats && read_ahead_stats->first == snapshot.snapshot_id;
+}
+
 unique_ptr<QueryResult> PostgresMetadataManager::ExecutePipeline(DuckLakeSnapshot snapshot,
                                                                  const vector<DuckLakeStatement> &batch,
                                                                  bool keep_results) {

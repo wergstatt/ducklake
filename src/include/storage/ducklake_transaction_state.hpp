@@ -162,6 +162,11 @@ struct DuckLakeCommitContext {
 	//! Invalidates the cached stats entry for a table after a stats-affecting file drop.
 	std::function<void(idx_t, TableIndex)> invalidate_table_stats_cache = [](idx_t, TableIndex) {
 	};
+	//! Caches the table stats that the commit wrote, as a read at the committed snapshot returns them, given the
+	//! tables whose stats it wrote or whose files it dropped.
+	std::function<void(DuckLakeSnapshot, vector<DuckLakeGlobalStatsInfo> &, const set<TableIndex> &)>
+	    cache_committed_table_stats = [](DuckLakeSnapshot, vector<DuckLakeGlobalStatsInfo> &, const set<TableIndex> &) {
+	    };
 	//! Reports a failure after the metadata commit is already durable.
 	// LCOV_EXCL_START
 	std::function<void(const string &)> report_post_commit_error = [](const string &) {
@@ -322,6 +327,8 @@ public:
 	map<TableIndex, map<FieldIndex, DuckLakeColumnStats>> added_field_stats;
 	//! The tables whose stored size this commit reads back from their live data files
 	set<TableIndex> refreshed_table_sizes;
+	//! The table stats that this commit writes from memory, with the column stats that have a row
+	map<TableIndex, DuckLakeGlobalStatsInfo> committed_table_stats;
 	//! The tables other transactions changed after the snapshot of a retried commit
 	set<TableIndex> tables_changed_by_others;
 	//! The snapshot tags this transaction creates, by name
