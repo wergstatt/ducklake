@@ -483,3 +483,31 @@ getvariable('postgres_replaced_2') = getvariable('postgres_replaced_12'),
 (SELECT count(*) FROM ducklake_list_files('ducklake', 'replaced_11'))
 ----
 true	true	true	1
+
+# an insert takes the schema versions of its table from the commit that created or altered the table
+statement ok
+CALL ducklake.set_option('data_inlining_row_limit', 10)
+
+statement ok
+CREATE TABLE ducklake.created_inlined (a INTEGER)
+
+statement ok
+CALL enable_logging('DuckLakeMetadata')
+
+statement ok
+INSERT INTO ducklake.created_inlined VALUES (1)
+
+statement ok
+ALTER TABLE ducklake.created_inlined ADD COLUMN b INTEGER
+
+statement ok
+INSERT INTO ducklake.created_inlined VALUES (2, 2)
+
+statement ok
+CALL disable_logging()
+
+query II
+SELECT count(*) > 0, count(*) FILTER (WHERE query LIKE '%MIN(schema_version), MAX(schema_version)%')
+FROM duckdb_logs_parsed('DuckLakeMetadata')
+----
+true	0
