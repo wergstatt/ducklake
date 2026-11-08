@@ -302,6 +302,10 @@ void DuckLakeCompactor::GenerateCompactions(DuckLakeTableEntry &table,
 	// FIXME: pass in the sort_data so that list of files is approximately sorted in the same way
 	// (sorted by the min/max metadata)
 	auto files = metadata_manager.GetFilesForCompaction(table, type, delete_threshold, snapshot, filter_options);
+	if (type == CompactionType::MERGE_ADJACENT_TABLES && files.size() < 2) {
+		// a merge needs two files, so a lone file needs no schema of its schema version
+		return;
+	}
 	auto files_compacted_in_transaction = transaction.GetCompactedFiles(table_id);
 
 	// Resolve, per schema_version (cached), whether a file written under it can be rewritten under the latest schema.
