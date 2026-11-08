@@ -326,6 +326,11 @@ void DuckLakeCompactor::GenerateCompactions(DuckLakeTableEntry &table,
 		if (cached != merges_into_latest_schema.end()) {
 			return cached->second;
 		}
+		auto last_change = catalog.GetTableSchemaVersions(transaction, table_id).last_change;
+		if (last_change.IsValid() && last_change.GetIndex() <= schema_version) {
+			// the table did not change since this schema version, so it has the latest fields
+			return true;
+		}
 		auto version_table = catalog.GetTableAtSchemaVersion(transaction, table_id, schema_version);
 		bool result =
 		    version_table && FieldsPreservedInLatest(version_table->GetFieldData().GetFieldIds(), latest_field_data);
