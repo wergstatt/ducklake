@@ -542,14 +542,25 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, 
 
 	auto schema = DuckLakeTableFunctionUtil::GetStringOption(input, "schema_name");
 	auto table = DuckLakeTableFunctionUtil::GetStringOption(input, "table_name");
-	vector<unique_ptr<LogicalOperator>> flushes;
-	vector<pair<reference<DuckLakeTableEntry>, unordered_map<idx_t, FileDeleteInfo>>> file_deletions;
+	vector<pair<reference<DuckLakeTableEntry>, vector<DuckLakeInlinedTableInfo>>> tables;
+	vector<Identifier> inlined_table_names;
 	for (auto &table_ref : DuckLakeBaseMetadataFunction::GetTablesInScope(context, ducklake_catalog, schema, table)) {
 		auto &table_entry = table_ref.get();
 		if (!ducklake_catalog.AutoCompactEnabled(table_entry)) {
 			continue;
 		}
-		for (auto &inlined_table : table_entry.GetInlinedDataTables(transaction, transaction.GetSnapshot())) {
+		auto inlined_tables = table_entry.GetInlinedDataTables(transaction, transaction.GetSnapshot());
+		for (auto &inlined_table : inlined_tables) {
+			inlined_table_names.push_back(inlined_table.table_name);
+		}
+		tables.emplace_back(table_entry, std::move(inlined_tables));
+	}
+	transaction.GetMetadataManager().ReadInlinedTablesForFlush(transaction.GetSnapshot(), inlined_table_names);
+	vector<unique_ptr<LogicalOperator>> flushes;
+	vector<pair<reference<DuckLakeTableEntry>, unordered_map<idx_t, FileDeleteInfo>>> file_deletions;
+	for (auto &entry : tables) {
+		auto &table_entry = entry.first.get();
+		for (auto &inlined_table : entry.second) {
 			DuckLakeDataFlusher flusher(context, ducklake_catalog, transaction, *input.binder, table_entry.GetTableId(),
 			                            inlined_table, release_metadata_transaction);
 			flushes.push_back(flusher.GenerateFlushCommand());

@@ -1119,12 +1119,12 @@ optional_idx DuckLakeCatalog::GetTableNetRowCount(DuckLakeTransaction &transacti
 	if (cached && cached->snapshot_id == snapshot.snapshot_id) {
 		return cached->row_count;
 	}
-	auto file_count = transaction.GetMetadataManager().GetNetDataFileRowCountForStats(table.GetTableId(), snapshot);
-	if (!file_count.IsValid()) {
+	auto row_count = transaction.GetMetadataManager().GetNetRowCount(table, snapshot);
+	if (!row_count.IsValid()) {
 		return optional_idx();
 	}
-	auto row_count = file_count.GetIndex() + table.GetNetInlinedRowCount(transaction);
-	PutCacheEntry(std::move(key), make_shared_ptr<DuckLakeTableNetRowCountCacheEntry>(snapshot.snapshot_id, row_count));
+	PutCacheEntry(std::move(key),
+	              make_shared_ptr<DuckLakeTableNetRowCountCacheEntry>(snapshot.snapshot_id, row_count.GetIndex()));
 	return row_count;
 }
 

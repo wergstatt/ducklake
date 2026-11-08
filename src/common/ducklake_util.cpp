@@ -94,6 +94,10 @@ string DuckLakeUtil::StatsToString(const string &text) {
 	return SQLString::ToString(text);
 }
 
+Value DuckLakeUtil::StatsValue(const string &text) {
+	return text.find('\0') != string::npos ? Value() : Value(text);
+}
+
 static string EscapeVarcharForSQL(const string &str_val) {
 	string ret;
 	bool concat = false;
@@ -188,10 +192,14 @@ string ToSQLString(DuckLakeMetadataManager &metadata_manager, const Value &value
 	}
 }
 
-string ToByteaHexLiteral(const string &raw_bytes) {
+static string ToByteaHex(const string &raw_bytes) {
 	string hex(raw_bytes.size() * 2, '\0');
 	CryptoHash::ToHex(const_data_ptr_cast(raw_bytes.data()), raw_bytes.size(), &hex[0]);
-	return "'\\x" + hex + "'";
+	return "\\x" + hex;
+}
+
+string ToByteaHexLiteral(const string &raw_bytes) {
+	return "'" + ToByteaHex(raw_bytes) + "'";
 }
 
 string DuckLakeUtil::ValueToSQL(DuckLakeMetadataManager &metadata_manager, ClientContext &context, const Value &val) {
@@ -226,6 +234,40 @@ string DuckLakeUtil::ValueToSQL(DuckLakeMetadataManager &metadata_manager, Clien
 		return result;
 	}
 	return SQLString::ToString(result);
+}
+
+Value DuckLakeUtil::ValueToParameter(DuckLakeMetadataManager &metadata_manager, ClientContext &context,
+                                     const Value &val) {
+	if (val.IsNull()) {
+		return Value();
+	}
+	if (val.type().HasAlias()) {
+		// extension type: cast to string
+		return ValueToParameter(metadata_manager, context, val.CastAs(context, LogicalType::VARCHAR));
+	}
+	bool use_native_type = metadata_manager.TypeIsNativelySupported(val.type());
+	switch (val.type().id()) {
+	case LogicalTypeId::VARCHAR:
+	case LogicalTypeId::BLOB:
+		if (!use_native_type) {
+			return Value(ToByteaHex(StringValue::Get(val)));
+		}
+		break;
+	case LogicalTypeId::INTERVAL: {
+		auto interval = IntervalValue::Get(val);
+		return Value(
+		    StringUtil::Format("%d months %d days %lld microseconds", interval.months, interval.days, interval.micros));
+	}
+	case LogicalTypeId::VARIANT:
+		// a native VARIANT or nested value has a literal that is an expression
+		return val;
+	default:
+		if (use_native_type && val.type().IsNested()) {
+			return val;
+		}
+		break;
+	}
+	return Value(val.ToString());
 }
 
 void DuckLakeUtil::EnsureDirectoryExists(FileSystem &fs, const string &data_path) {
@@ -488,6 +530,10 @@ string DuckLakeUtil::OptionalIdxOrNull(const optional_idx &v) {
 	return v.IsValid() ? std::to_string(v.GetIndex()) : "NULL";
 }
 
+Value DuckLakeUtil::OptionalIdxValue(const optional_idx &v) {
+	return v.IsValid() ? Value::UBIGINT(v.GetIndex()) : Value();
+}
+
 string DuckLakeUtil::MappingIdOrNull(const MappingIndex &m) {
 	return m.IsValid() ? std::to_string(m.index) : "NULL";
 }
@@ -497,6 +543,10 @@ string DuckLakeUtil::EncryptionKeyLiteral(const string &key) {
 		return "NULL";
 	}
 	return "'" + Blob::ToBase64(string_t(key)) + "'";
+}
+
+Value DuckLakeUtil::EncryptionKeyValue(const string &key) {
+	return key.empty() ? Value() : Value(Blob::ToBase64(string_t(key)));
 }
 
 string DuckLakeUtil::WithBinaryCollation(const string &expression) {
@@ -602,6 +652,25 @@ vector<string> DuckLakeUtil::InlinedDataToSQL(DuckLakeTransaction &transaction, 
 	for (auto &chunk : data.Chunks()) {
 		for (idx_t r = 0; r < chunk.size(); r++) {
 			rows.push_back(ChunkRowToSQL(metadata_manager, *context, chunk, r));
+		}
+	}
+	return rows;
+}
+
+vector<DuckLakeStatement> DuckLakeUtil::InlinedDataToParameters(DuckLakeTransaction &transaction,
+                                                                ColumnDataCollection &data) {
+	auto &metadata_manager = transaction.GetMetadataManager();
+	auto context = transaction.context.lock();
+	vector<DuckLakeStatement> rows;
+	rows.reserve(data.Count());
+	for (auto &chunk : data.Chunks()) {
+		for (idx_t r = 0; r < chunk.size(); r++) {
+			DuckLakeStatement row;
+			for (idx_t c = 0; c < chunk.ColumnCount(); c++) {
+				row.sql += (c > 0 ? ", $" : "$") + to_string(c + 1);
+				row.params.push_back(ValueToParameter(metadata_manager, *context, chunk.GetValue(c, r)));
+			}
+			rows.push_back(std::move(row));
 		}
 	}
 	return rows;

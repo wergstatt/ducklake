@@ -54,12 +54,15 @@ bool DuckLakeColumnGeoStats::TrySerialize(string &result) const {
 	root.Add("bbox", bbox);
 	root.Add("types", types);
 	writer.SetRoot(root);
-	result = SQLString::ToString(writer.ToString(JSONWriteFlags::ALLOW_INF_AND_NAN));
+	result = writer.ToString(JSONWriteFlags::ALLOW_INF_AND_NAN);
 	return true;
 }
 
 void DuckLakeColumnGeoStats::Serialize(DuckLakeColumnStatsInfo &column_stats) const {
-	TrySerialize(column_stats.extra_stats);
+	string extra_stats;
+	if (TrySerialize(extra_stats)) {
+		column_stats.extra_stats = Value(extra_stats);
+	}
 }
 
 void DuckLakeColumnGeoStats::Deserialize(const string &stats) {

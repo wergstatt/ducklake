@@ -17,6 +17,7 @@
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/common/types/value.hpp"
+#include "storage/ducklake_statement.hpp"
 
 namespace duckdb {
 class ClientContext;
@@ -57,7 +58,11 @@ public:
 	static string ToQuotedList(const vector<Identifier> &input, char list_separator = ',');
 	static vector<string> ParseQuotedList(const string &input, char list_separator = ',');
 	static string StatsToString(const string &text);
+	//! The value of a stats bound, NULL for text that StatsToString writes as NULL
+	static Value StatsValue(const string &text);
 	static string ValueToSQL(DuckLakeMetadataManager &metadata_manager, ClientContext &context, const Value &val);
+	//! The value as a parameter: the text of the literal of ValueToSQL, or the value where that literal is no text
+	static Value ValueToParameter(DuckLakeMetadataManager &metadata_manager, ClientContext &context, const Value &val);
 
 	static ParsedCatalogEntry ParseCatalogEntry(const string &input);
 	static string JoinPath(FileSystem &fs, const string &a, const string &b);
@@ -85,10 +90,12 @@ public:
 	static bool IsInlinedSystemColumn(const Identifier &name, bool prefixed_inlined_columns);
 
 	static string OptionalIdxOrNull(const optional_idx &v);
+	static Value OptionalIdxValue(const optional_idx &v);
 
 	static string MappingIdOrNull(const MappingIndex &m);
 
 	static string EncryptionKeyLiteral(const string &key);
+	static Value EncryptionKeyValue(const string &key);
 
 	//! The text expression compared byte for byte, in DuckDB and in Postgres
 	static string WithBinaryCollation(const string &expression);
@@ -128,6 +135,9 @@ public:
 	                                       const LogicalType &type);
 	//! Formats inlined rows as comma separated cell literals in storage types
 	static vector<string> InlinedDataToSQL(DuckLakeTransaction &transaction, ColumnDataCollection &data);
+	//! Inlined rows as comma separated cell parameters in storage types
+	static vector<DuckLakeStatement> InlinedDataToParameters(DuckLakeTransaction &transaction,
+	                                                         ColumnDataCollection &data);
 };
 
 } // namespace duckdb

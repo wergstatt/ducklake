@@ -1,0 +1,71 @@
+# name: test/sql/data_inlining/inlined_values_as_parameters.test
+# description: inlined rows and their stats keep every value, also a quote, a NUL byte, a NaN and NULLs
+# group: [data_inlining]
+
+require ducklake
+
+require parquet
+
+require icu
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+SET TimeZone = 'UTC'
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/inlined_values_as_parameters', DATA_INLINING_ROW_LIMIT 10)
+
+statement ok
+CREATE TABLE dl.t (i INTEGER, d DOUBLE, s VARCHAR, dt DATE, dec DECIMAL(10, 2), u UUID, h HUGEINT, ts TIMESTAMP,
+  tz TIMESTAMPTZ, iv INTERVAL, b BLOB, l INTEGER[], st STRUCT(a INTEGER, b VARCHAR), bo BOOLEAN, t TIME, ub UBIGINT)
+
+# the first insert creates the inlined data table
+statement ok
+INSERT INTO dl.t VALUES (5, 2.5, 'm', DATE '2026-01-05', 5.50, '00000000-0000-0000-0000-000000000005', 5,
+  TIMESTAMP '2026-01-05 10:00:00', TIMESTAMPTZ '2026-01-05 10:00:00+00', INTERVAL 5 DAYS, '\x05'::BLOB, [5],
+  {'a': 5, 'b': 'm'}, true, TIME '05:00:00', 5)
+
+statement ok
+INSERT INTO dl.t VALUES (1, 'nan', 'it''s', DATE '2025-12-31', 1.25, '00000000-0000-0000-0000-000000000001', -1,
+  TIMESTAMP '2025-12-31 23:59:59.123456', TIMESTAMPTZ '2025-12-31 23:59:59+00', INTERVAL '1 month 2 days 3 seconds',
+  '\x00''\xFF'::BLOB, [1, NULL], {'a': 1, 'b': 'it''s'}, false, TIME '23:59:59.999999', 18446744073709551615),
+  (2, 3.5, 'nul' || chr(0) || 'byte', DATE '2026-02-01', 2.00, 'ffffffff-ffff-ffff-ffff-ffffffffffff',
+  170141183460469231731687303715884105727, TIMESTAMP '2026-02-01 00:00:00', TIMESTAMPTZ '2026-02-01 00:00:00+00',
+  INTERVAL '1 year', ''::BLOB, [], {'a': NULL, 'b': NULL}, NULL, TIME '00:00:00', 0),
+  (NULL, NULL, 'zz', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+
+query IIIIIIII
+SELECT rowid, i, d, s = 'nul' || chr(0) || 'byte' OR s IN ('m', 'it''s', 'zz'), dt, dec, u, h FROM dl.t ORDER BY rowid
+----
+0	5	2.5	true	2026-01-05	5.50	00000000-0000-0000-0000-000000000005	5
+1	1	nan	true	2025-12-31	1.25	00000000-0000-0000-0000-000000000001	-1
+2	2	3.5	true	2026-02-01	2.00	ffffffff-ffff-ffff-ffff-ffffffffffff	170141183460469231731687303715884105727
+3	NULL	NULL	true	NULL	NULL	NULL	NULL
+
+query IIIIIIIIII
+SELECT rowid, ts, tz, iv, b, l, st, bo, t, ub FROM dl.t ORDER BY rowid
+----
+0	2026-01-05 10:00:00	2026-01-05 10:00:00+00	5 days	\x05	[5]	{'a': 5, 'b': m}	true	05:00:00	5
+1	2025-12-31 23:59:59.123456	2025-12-31 23:59:59+00	1 month 2 days 00:00:03	\x00\x27\xFF	[1, NULL]	{'a': 1, 'b': 'it\'s'}	false	23:59:59.999999	18446744073709551615
+2	2026-02-01 00:00:00	2026-02-01 00:00:00+00	1 year	(empty)	[]	{'a': NULL, 'b': NULL}	NULL	00:00:00	0
+3	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+
+query IIIIIII
+SELECT column_id, contains_null, contains_nan, min_value, max_value, min_is_exact, max_is_exact
+FROM __ducklake_metadata_dl.ducklake_table_column_stats WHERE column_id <= 7 ORDER BY column_id
+----
+1	true	NULL	1	5	true	true
+2	true	true	2.5	nan	true	true
+3	false	NULL	it's	zz	true	true
+4	true	NULL	2025-12-31	2026-02-01	true	true
+5	true	NULL	1.25	5.50	true	true
+6	true	NULL	00000000-0000-0000-0000-000000000001	ffffffff-ffff-ffff-ffff-ffffffffffff	true	true
+7	true	NULL	-1	170141183460469231731687303715884105727	true	true
+
+query III
+SELECT record_count, next_row_id, file_size_bytes FROM __ducklake_metadata_dl.ducklake_table_stats
+----
+4	4	0

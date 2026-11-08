@@ -72,7 +72,7 @@ private:
 	//! Assemble the DuckLakeCommitContext with all closures.
 	DuckLakeCommitContext BuildContext(idx_t &committed_snapshot_id, idx_t &committed_schema_version);
 	//! Build INSERT SQL from staged inlined tuples.
-	string BuildInlinedDataInserts(const vector<DuckLakeInlinedDataInfo> &new_data);
+	DuckLakeBatch BuildInlinedDataInserts(const vector<DuckLakeInlinedDataInfo> &new_data, idx_t snapshot_id);
 	//! Resolve and cache the latest inlined-data table name.
 	const Identifier &ResolveInlinedTableName(TableIndex table_id);
 	//! All inlined-data table names registered for a table id (any schema version).

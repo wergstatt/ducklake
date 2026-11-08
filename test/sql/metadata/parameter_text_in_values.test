@@ -1,0 +1,47 @@
+# name: test/sql/metadata/parameter_text_in_values.test
+# description: a path, a min value or an inlined text that contains a parameter, a quote or the end of a statement is stored as it is
+# group: [metadata]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/parameter_text_in_values.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS lake (DATA_PATH '{DATA_PATH}/parameter_text_in_values', DATA_INLINING_ROW_LIMIT 10)
+
+statement ok
+CREATE TABLE lake.t (i INTEGER, s VARCHAR)
+
+statement ok
+COPY (SELECT 42 AS i, 'it''s $1;' AS s) TO '{DATA_PATH}/parameter_$1;''.parquet'
+
+statement ok
+CALL ducklake_add_data_files('lake', 't', '{DATA_PATH}/parameter_$1;''.parquet')
+
+statement ok
+INSERT INTO lake.t SELECT i, '$1; it''s ' || i FROM range(20) t(i)
+
+statement ok
+INSERT INTO lake.t VALUES (-1, 'inlined ''$2;'' $1')
+
+query II
+SELECT i, s FROM lake.t WHERE i IN (-1, 0, 42) ORDER BY i
+----
+-1	inlined '$2;' $1
+0	$1; it's 0
+42	it's $1;
+
+query II
+SELECT min_value, max_value FROM __ducklake_metadata_lake.ducklake_file_column_stats WHERE column_id = 2 ORDER BY data_file_id
+----
+it's $1;	it's $1;
+$1; it's 0	$1; it's 9
+
+query II
+SELECT min_value, max_value FROM __ducklake_metadata_lake.ducklake_table_column_stats WHERE column_id = 2
+----
+$1; it's 0	it's $1;

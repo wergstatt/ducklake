@@ -1,0 +1,84 @@
+# name: test/sql/data_inlining/flush_reads_in_one_batch_postgres.test
+# description: on PostgreSQL a flush reads the rows of every inlined table in one pipeline
+# group: [data_inlining]
+
+require ducklake
+
+require parquet
+
+require postgres_scanner
+
+require-env DUCKLAKE_CI
+
+require-env DUCKLAKE_CONNECTION
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '{DATA_PATH}/flush_reads_in_one_batch_postgres', DATA_INLINING_ROW_LIMIT 10)
+
+statement ok
+CREATE TABLE dl.t (i INTEGER)
+
+statement ok
+CREATE TABLE dl.u (s VARCHAR)
+
+statement ok
+CREATE TABLE dl.v (d DATE)
+
+statement ok
+INSERT INTO dl.t VALUES (1), (2), (3)
+
+statement ok
+INSERT INTO dl.u VALUES ('a'), ('b')
+
+statement ok
+INSERT INTO dl.v VALUES (DATE '2026-11-08')
+
+statement ok
+DELETE FROM dl.t WHERE i = 2
+
+statement ok
+CALL enable_logging('DuckLakeMetadata', storage = 'memory')
+
+query III
+SELECT * FROM ducklake_flush_inlined_data('dl') ORDER BY table_name
+----
+main	t	3
+main	u	2
+main	v	1
+
+statement ok
+CALL disable_logging()
+
+# the rows of the three inlined tables are read in one request, not counting their DELETEs
+query I
+SELECT count(*) = 1 OR NOT EXISTS (SELECT 1 FROM duckdb_functions() WHERE function_name = 'postgres_pipeline_result')
+FROM duckdb_logs_parsed('DuckLakeMetadata')
+WHERE regexp_matches(query, 'ducklake_inlined_data_\d') AND NOT contains(query, 'DELETE')
+----
+true
+
+query I
+SELECT i FROM dl.t ORDER BY i
+----
+1
+3
+
+query I
+SELECT s FROM dl.u ORDER BY s
+----
+a
+b
+
+query I
+SELECT d FROM dl.v
+----
+2026-11-08
+
+query I
+SELECT i FROM dl.t AT (VERSION => 4) ORDER BY i
+----
+1
+2
+3
