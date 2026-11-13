@@ -12,6 +12,7 @@
 
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 #include "duckdb/common/multi_file/multi_file_data.hpp"
+#include "duckdb/common/multi_file/table_function_multi_file.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
@@ -48,10 +49,9 @@ static void DuckLakeGetMetrics(TableFunctionGetMetricsInput &input) {
 	auto &gstate = input.global_state->Cast<MultiFileGlobalState>();
 	auto &file_list = gstate.file_list.Cast<DuckLakeMultiFileList>();
 
-	// This replaces the multi-file scan's own get_metrics, so it also has to report the rows scanned that one would
-	if (input.local_state) {
-		input.operator_metrics.rows_scanned = input.local_state->Cast<MultiFileLocalState>().rows_scanned;
-	}
+	// This replaces the multi-file scan's own get_metrics, so it also has to report the rows scanned and the row
+	// groups read that one would
+	TableFunctionMultiFileWrapper::GetMetrics(input);
 
 	// Count different types of files
 	auto files_loaded = gstate.file_index.load();

@@ -1,0 +1,48 @@
+# name: test/sql/general/ducklake_row_groups_scanned.test
+# description: The profiler reports the row groups a DuckLake scan reads from data files
+# group: [general]
+
+require ducklake
+
+require parquet
+
+require json
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_row_groups_scanned', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CALL ducklake.set_option('parquet_row_group_size', '2048')
+
+# two row groups: 2048 rows and 8 rows
+statement ok
+CREATE TABLE ducklake.t AS SELECT range AS i FROM range(2056)
+
+statement ok
+PRAGMA enable_profiling = 'json'
+
+statement ok
+PRAGMA profiling_output = '{TEST_DIR}/ducklake_row_groups_scanned.json'
+
+statement ok
+SET tracked_metrics = ['query.total_row_groups_scanned', 'query.total_row_groups_to_scan', 'query.total_rows_scanned']
+
+# the filter excludes the first row group
+statement ok
+SELECT sum(i) FROM ducklake.t WHERE i >= 2048
+
+statement ok
+PRAGMA disable_profiling
+
+query III
+SELECT
+  query.total_row_groups_scanned,
+  query.total_row_groups_to_scan,
+  query.total_rows_scanned
+FROM '{TEST_DIR}/ducklake_row_groups_scanned.json'
+----
+1	2	8
