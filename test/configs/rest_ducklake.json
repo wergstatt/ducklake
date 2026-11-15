@@ -46,7 +46,8 @@
         "test/sql/stats/count_star_optimization_cache.test",
         "test/sql/general/ducklake_metadata_logging.test",
         "test/sql/transaction/commit_skips_catalog_load.test",
-        "test/sql/transaction/commit_retry_skips_catalog_load.test"
+        "test/sql/transaction/commit_retry_skips_catalog_load.test",
+        "test/sql/transaction/local_insert_scan_file_list_once.test"
       ]
     },
     {

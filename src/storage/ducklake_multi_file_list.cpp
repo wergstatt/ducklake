@@ -1,4 +1,5 @@
 #include "common/ducklake_util.hpp"
+#include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_scan.hpp"
 #include "storage/ducklake_multi_file_list.hpp"
 #include "storage/ducklake_multi_file_reader.hpp"
@@ -449,11 +450,23 @@ idx_t DuckLakeMultiFileList::GetTotalFileCount() const {
 }
 
 unique_ptr<NodeStatistics> DuckLakeMultiFileList::GetCardinality(ClientContext &context) const {
-	auto stats = read_info.table.GetTableStats(context);
+	// without an estimate the optimizer reads the file list, the rows of the transaction add to the committed ones
+	if (IsTransactionLocal(read_info.table_id)) {
+		return nullptr;
+	}
+	auto &transaction = DuckLakeTransaction::Get(context, read_info.table.ParentCatalog());
+	auto stats = transaction.GetCatalog().GetTableStats(transaction, read_info.table_id);
 	if (!stats || stats->record_count_unknown) {
 		return nullptr;
 	}
-	return make_uniq<NodeStatistics>(stats->record_count);
+	idx_t cardinality = stats->record_count;
+	for (auto &file : transaction_local_files) {
+		cardinality += file.row_count;
+	}
+	if (transaction_local_data) {
+		cardinality += transaction_local_data->Count();
+	}
+	return make_uniq<NodeStatistics>(cardinality);
 }
 
 DuckLakeTableEntry &DuckLakeMultiFileList::GetTable() {

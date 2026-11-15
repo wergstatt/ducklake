@@ -1,0 +1,48 @@
+# name: test/sql/transaction/local_insert_scan_file_list_once.test
+# description: A scan with filters of a table with transaction-local inserts reads the file list once
+# group: [transaction]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/local_insert_scan_file_list_once', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok
+INSERT INTO t FROM range(100)
+
+statement ok
+INSERT INTO t FROM range(100, 200)
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO t VALUES (1000)
+
+statement ok
+CALL enable_logging('DuckLakeMetadata', storage => 'memory')
+
+query I
+SELECT count(*) FROM t WHERE i > 150
+----
+50
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE query LIKE '%data.path AS data_path%'
+----
+1
+
+statement ok
+ROLLBACK
