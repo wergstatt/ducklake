@@ -1,0 +1,33 @@
+# name: test/sql/rest/rest_server_extension_settings.test
+# description: A DuckLake REST server that attaches its DuckLake in a database of its own finds extensions with the settings of the database that starts it
+# group: [rest]
+
+require ducklake
+
+# the metadata database of the DuckLake is MySQL, whose extension is not linked: the server installs it from the
+# repository of the calling database
+statement ok
+SET autoinstall_known_extensions = true
+
+statement ok
+SET custom_extension_repository = '{TEST_DIR}/calling_repository'
+
+statement error
+SELECT * FROM ducklake_rest_serve('ducklake:mysql:db=rest', attach_options := 'DATA_PATH ''{TEST_DIR}/{BASE_TEST_NAME}_files''')
+----
+calling_repository
+
+statement ok
+RESET custom_extension_repository
+
+# and looks for it in the extension directories of the calling database, installing nothing if that does not
+statement ok
+SET autoinstall_known_extensions = false
+
+statement ok
+SET extension_directories = ['{TEST_DIR}/calling_extensions']
+
+statement error
+SELECT * FROM ducklake_rest_serve('ducklake:mysql:db=rest', attach_options := 'DATA_PATH ''{TEST_DIR}/{BASE_TEST_NAME}_files''')
+----
+calling_extensions
