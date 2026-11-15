@@ -92,8 +92,9 @@ public:
 	DuckLakeRESTServer();
 	~DuckLakeRESTServer();
 
-	//! Serves a catalog under the prefix, replacing the catalog that was served under it
-	void AddCatalog(const string &prefix, shared_ptr<DatabaseInstance> db, string catalog_name);
+	//! Serves a catalog under the prefix, replacing the catalog that was served under it. A catalog that is the only
+	//! writer of its metadata answers reads with the snapshot that it read or committed last
+	void AddCatalog(const string &prefix, shared_ptr<DatabaseInstance> db, string catalog_name, bool single_writer);
 	//! Stops serving the catalog under the prefix, returns whether there was one
 	bool RemoveCatalog(const string &prefix);
 	//! The number of files of the first response of a scan, and of every other page of the scan

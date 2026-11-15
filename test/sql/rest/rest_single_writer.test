@@ -1,0 +1,158 @@
+# name: test/sql/rest/rest_single_writer.test
+# description: A REST server that is the only writer of its catalog answers reads with the snapshot it committed last, and notices the commits of another writer at its next commit
+# group: [rest]
+
+require ducklake
+
+require parquet
+
+# the catalog of the server shares its metadata with the second DuckLake of the test, which stands for another writer
+statement ok rest_db:rest_server_con
+ATTACH 'ducklake:{TEST_DIR}/{BASE_TEST_NAME}_rest_server.db' AS rest_lake (DATA_PATH '{TEST_DIR}/{BASE_TEST_NAME}_rest_files', METADATA_CATALOG 'rest_meta')
+
+statement ok rest_db:rest_server_con
+ATTACH 'ducklake:{TEST_DIR}/{BASE_TEST_NAME}_rest_server.db' AS outside (DATA_PATH '{TEST_DIR}/{BASE_TEST_NAME}_rest_files', METADATA_CATALOG 'rest_meta')
+
+statement ok rest_db:rest_server_con
+CALL enable_logging(level = 'debug', storage = 'memory')
+
+statement ok rest_db:rest_server_con
+SET VARIABLE rest_listen_uri = (SELECT listen_uri FROM ducklake_rest_serve('rest_lake'))
+
+set variable rest_server <variable:rest_server_con:rest_listen_uri>
+
+statement ok
+ATTACH 'ducklake:rest:{rest_server}' AS dl (DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE dl.t AS SELECT * FROM range(10) r(i)
+
+# without the parameter the server asks for the latest snapshot to answer a read
+statement ok rest_db:rest_server_con
+SET VARIABLE snapshot_queries = (SELECT count(*) FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE catalog = 'rest_lake' AND query LIKE '%WHERE snapshot_id = (SELECT MAX(snapshot_id)%')
+
+query I
+SELECT count(*) FROM dl.t
+----
+10
+
+query I
+SELECT count(*) FROM dl.t
+----
+10
+
+query I rest_db:rest_server_con
+SELECT count(*) - getvariable('snapshot_queries') >= 2 FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE catalog = 'rest_lake' AND query LIKE '%WHERE snapshot_id = (SELECT MAX(snapshot_id)%'
+----
+true
+
+# the same server and client with the parameter
+statement ok rest_db:rest_server_con
+SELECT * FROM ducklake_rest_serve('rest_lake', port := regexp_extract(getvariable('rest_listen_uri'), ':([0-9]+)/', 1)::UBIGINT, single_writer := true)
+
+# the first read of the server asks for the latest snapshot
+query I
+SELECT count(*) FROM dl.t
+----
+10
+
+statement ok rest_db:rest_server_con
+SET VARIABLE snapshot_queries = (SELECT count(*) FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE catalog = 'rest_lake' AND query LIKE '%WHERE snapshot_id = (SELECT MAX(snapshot_id)%')
+
+# the next reads do not, also those of a client that attaches
+query I
+SELECT count(*) FROM dl.t
+----
+10
+
+statement ok con2
+ATTACH 'ducklake:rest:{rest_server}' AS dl2
+
+query I con2
+SELECT sum(i) FROM dl2.t
+----
+45
+
+# the commits through the server are the latest snapshot of the next reads, also those of other clients
+statement ok
+INSERT INTO dl.t VALUES (100)
+
+query I
+SELECT count(*) FROM dl.t
+----
+11
+
+query I con2
+SELECT sum(i) FROM dl2.t
+----
+145
+
+statement ok con2
+CREATE TABLE dl2.u(j INTEGER)
+
+query I
+SELECT count(*) FROM dl.u
+----
+0
+
+query I rest_db:rest_server_con
+SELECT count(*) - getvariable('snapshot_queries') FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE catalog = 'rest_lake' AND query LIKE '%WHERE snapshot_id = (SELECT MAX(snapshot_id)%'
+----
+0
+
+# the commits of the server follow each other
+query I rest_db:rest_server_con
+SELECT count(*) FROM duckdb_logs WHERE log_level = 'WARNING' AND contains(message, 'is the only writer of its metadata')
+----
+0
+
+# another writer commits, which the server does not see until its next commit
+statement ok rest_db:rest_server_con
+CREATE TABLE outside.o AS SELECT 42 AS x
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'dl' AND table_name = 'o'
+----
+0
+
+statement ok
+INSERT INTO dl.t VALUES (200)
+
+query I rest_db:rest_server_con
+SELECT count(*) FROM duckdb_logs WHERE log_level = 'WARNING' AND contains(message, 'is the only writer of its metadata')
+----
+1
+
+# the reads after the commit see the commit of the other writer
+query I
+SELECT x FROM dl.o
+----
+42
+
+query I con2
+SELECT sum(i) FROM dl2.t
+----
+345
+
+query I rest_db:rest_server_con
+SELECT count(*) - getvariable('snapshot_queries') FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE catalog = 'rest_lake' AND query LIKE '%WHERE snapshot_id = (SELECT MAX(snapshot_id)%'
+----
+0
+
+# a server that stops serving the catalog does not keep its snapshot
+statement ok rest_db:rest_server_con
+SELECT * FROM ducklake_rest_stop(regexp_extract(getvariable('rest_listen_uri'), '^(.*://[^/]+)', 1))
+
+statement ok rest_db:rest_server_con
+INSERT INTO outside.o VALUES (43)
+
+query I rest_db:rest_server_con
+SELECT count(*) FROM rest_lake.o
+----
+2
+
+statement ok
+DETACH dl
+
+statement ok con2
+DETACH dl2

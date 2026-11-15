@@ -1878,8 +1878,18 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 	context.set_catalog_version = [&](idx_t schema_version) {
 		catalog_version = schema_version;
 		committed_snapshot.schema_version = schema_version;
+		ducklake_catalog.SetKnownSnapshot(committed_snapshot);
 	};
 	context.set_committed_snapshot_id = [&](idx_t snapshot_id, idx_t next_catalog_id, idx_t next_file_id) {
+		// the snapshot of a single writer follows the snapshot that it knows
+		auto known_snapshot = ducklake_catalog.GetKnownSnapshot();
+		if (known_snapshot && known_snapshot->snapshot_id + 1 < snapshot_id) {
+			DUCKDB_LOG_WARNING(db,
+			                   "DuckLake %s is the only writer of its metadata, but another writer committed the "
+			                   "snapshots %llu to %llu",
+			                   ducklake_catalog.GetName().GetIdentifierName(), known_snapshot->snapshot_id + 1,
+			                   snapshot_id - 1);
+		}
 		ducklake_catalog.SetCommittedSnapshotId(snapshot_id);
 		committed_snapshot.snapshot_id = snapshot_id;
 		committed_snapshot.next_catalog_id = next_catalog_id;
@@ -2437,8 +2447,12 @@ Identifier DuckLakeTransaction::GetDefaultSchemaName() {
 DuckLakeSnapshot DuckLakeTransaction::GetLatestSnapshot() {
 	lock_guard<mutex> guard(snapshot_lock);
 	if (!snapshot) {
-		// no snapshot loaded yet for this transaction - load it
-		snapshot = metadata_manager->GetSnapshot();
+		// no snapshot loaded yet for this transaction - the only writer of the metadata knows it, else load it
+		snapshot = ducklake_catalog.GetKnownSnapshot();
+		if (!snapshot) {
+			snapshot = metadata_manager->GetSnapshot();
+			ducklake_catalog.SetKnownSnapshot(*snapshot);
+		}
 	}
 	return *snapshot;
 }

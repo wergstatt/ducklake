@@ -813,6 +813,30 @@ void DuckLakeCatalog::AssignStableOid(CatalogEntry &entry, idx_t id) {
 	entry.oid = oid;
 }
 
+void DuckLakeCatalog::SetSingleWriter(bool value) {
+	lock_guard<mutex> guard(commit_lock);
+	single_writer = value;
+	known_snapshot = DuckLakeSnapshot();
+}
+
+unique_ptr<DuckLakeSnapshot> DuckLakeCatalog::GetKnownSnapshot() const {
+	lock_guard<mutex> guard(commit_lock);
+	// a commit that only reported the id of its snapshot leaves an older snapshot behind
+	if (!single_writer || known_snapshot.snapshot_id == DConstants::INVALID_INDEX ||
+	    (last_committed_snapshot.IsValid() && known_snapshot.snapshot_id < last_committed_snapshot.GetIndex())) {
+		return nullptr;
+	}
+	return make_uniq<DuckLakeSnapshot>(known_snapshot);
+}
+
+void DuckLakeCatalog::SetKnownSnapshot(const DuckLakeSnapshot &snapshot) {
+	lock_guard<mutex> guard(commit_lock);
+	if (single_writer && (known_snapshot.snapshot_id == DConstants::INVALID_INDEX ||
+	                      snapshot.snapshot_id > known_snapshot.snapshot_id)) {
+		known_snapshot = snapshot;
+	}
+}
+
 void DuckLakeCatalog::SetEntryOids(const ducklake_entry_oids_t &oids) {
 	lock_guard<mutex> guard(entry_oids_lock);
 	entry_oids.insert(oids.begin(), oids.end());

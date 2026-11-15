@@ -68,10 +68,20 @@ DuckLakeSnapshot DuckLakeRESTRequest::GetSnapshot(const RESTSnapshotReference &r
 DuckLakeRESTServer::DuckLakeRESTServer() {
 }
 
-void DuckLakeRESTServer::AddCatalog(const string &prefix, shared_ptr<DatabaseInstance> db, string catalog_name) {
+//! Declares a served catalog the only writer of its metadata, or not, if its database still has the catalog
+static void SetSingleWriter(DatabaseInstance &db, const string &catalog_name, bool single_writer) {
+	auto database = DatabaseManager::Get(db).GetDatabase(Identifier(catalog_name));
+	if (database && database->GetCatalog().GetCatalogType() == "ducklake") {
+		database->GetCatalog().Cast<DuckLakeCatalog>().SetSingleWriter(single_writer);
+	}
+}
+
+void DuckLakeRESTServer::AddCatalog(const string &prefix, shared_ptr<DatabaseInstance> db, string catalog_name,
+                                    bool single_writer) {
 	if (prefix.empty() || prefix.find('/') != string::npos) {
 		throw InvalidInputException("The prefix of a catalog has to be a name without slashes, not \"%s\"", prefix);
 	}
+	SetSingleWriter(*db, catalog_name, single_writer);
 	lock_guard<mutex> guard(catalog_lock);
 	catalogs[prefix] = ServedCatalog {prefix, std::move(db), std::move(catalog_name)};
 }
@@ -139,6 +149,7 @@ bool DuckLakeRESTServer::RemoveCatalog(const string &prefix) {
 		removed = std::move(entry->second);
 		catalogs.erase(entry);
 	}
+	SetSingleWriter(*removed.db, removed.catalog_name, false);
 	return true;
 }
 
@@ -161,6 +172,9 @@ DuckLakeRESTServer::ServedCatalog DuckLakeRESTServer::GetCatalog(optional_ptr<co
 
 DuckLakeRESTServer::~DuckLakeRESTServer() {
 	Stop();
+	for (auto &entry : catalogs) {
+		SetSingleWriter(*entry.second.db, entry.second.catalog_name, false);
+	}
 }
 
 static int32_t StatusCodeForError(ExceptionType type) {
@@ -459,10 +473,12 @@ static unique_ptr<FunctionData> DuckLakeRESTServeBind(ClientContext &context, Ta
 	auto options_val = GetNamedParameter(input, "attach_options");
 	auto wait_val = GetNamedParameter(input, "wait");
 	auto token_val = GetNamedParameter(input, "token");
+	auto single_writer_val = GetNamedParameter(input, "single_writer");
 	string host = host_val.IsNull() ? "localhost" : StringValue::Get(host_val);
 	idx_t port = port_val.IsNull() ? 0 : port_val.GetValue<idx_t>();
 	string attach_options = options_val.IsNull() ? string() : StringValue::Get(options_val);
 	bool wait = !wait_val.IsNull() && BooleanValue::Get(wait_val);
+	bool single_writer = !single_writer_val.IsNull() && BooleanValue::Get(single_writer_val);
 
 	auto prefix_val = GetNamedParameter(input, "prefix");
 	auto defaults_val = GetNamedParameter(input, "defaults");
@@ -515,7 +531,7 @@ static unique_ptr<FunctionData> DuckLakeRESTServeBind(ClientContext &context, Ta
 	if (!defaults_val.IsNull() || !overrides_val.IsNull()) {
 		server->SetClientProperties(ToStringMap(defaults_val), ToStringMap(overrides_val));
 	}
-	server->AddCatalog(prefix, std::move(db), catalog_name);
+	server->AddCatalog(prefix, std::move(db), catalog_name, single_writer);
 	auto listen_uri = server->ListenURI() + "/" + prefix;
 	if (wait) {
 		server->Wait(); // LCOV_EXCL_LINE
@@ -624,6 +640,7 @@ DuckLakeRESTServeFunction::DuckLakeRESTServeFunction()
 		    .Add("attach_options", LogicalType::VARCHAR)
 		    .Add("wait", LogicalType::BOOLEAN)
 		    .Add("token", LogicalType::VARCHAR)
+		    .Add("single_writer", LogicalType::BOOLEAN)
 		    .Add("prefix", LogicalType::VARCHAR)
 		    .Add("files_per_page", LogicalType::UBIGINT)
 		    .Add("page_size", LogicalType::UBIGINT)

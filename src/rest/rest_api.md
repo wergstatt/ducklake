@@ -28,6 +28,7 @@ SELECT listen_uri FROM ducklake_rest_serve('ducklake:metadata.ducklake', port :=
 | `attach_options` | Options for the isolated `ATTACH`, e.g. `DATA_PATH '...'`.                               |
 | `wait`           | Block until the server is stopped, e.g. to run a server from the CLI.                    |
 | `token`          | Require requests to carry this token (`Authorization: Bearer <token>`).                  |
+| `single_writer`  | The server is the only process that commits to the catalog (see below).                  |
 | `prefix`         | The prefix of the catalog in the URLs of the server (default: the name of the catalog).  |
 | `files_per_page` | The number of files in a response of a scan and in each of its pages (default 10000).   |
 | `page_size`      | The number of entries of a page of a list if the request has no `page_size` (default 1000). |
@@ -39,6 +40,13 @@ The function returns the `listen_uri` of the catalog: the address of the server 
 process adds it to that server, under its own prefix. Serving a catalog under a prefix that is served already replaces the
 catalog. `ducklake_rest_stop` stops serving the catalog of a `listen_uri` with a prefix, and stops the server for a URI
 without one (`http://localhost:8181`).
+
+With `single_writer := true` the server answers reads without asking the metadata for the latest snapshot: it keeps the
+snapshot that it read or committed last. This is only correct if no other process commits to the metadata of the catalog:
+clients have to commit through the server, and maintenance (`ducklake_merge_adjacent_files`, expiry, ...) has to run in
+the process of the server. A commit of another process is only noticed at the next commit of the server, which logs a
+warning for it; reads in between do not see the commit. Without the parameter the server reads the latest snapshot for
+each request.
 
 `ducklake_rest_request(listen_uri, method, path, body)` sends an HTTP request to a server and returns the status code,
 the response and its content type, which is useful to explore the API. The request asks for JSON; the `accept` option sets

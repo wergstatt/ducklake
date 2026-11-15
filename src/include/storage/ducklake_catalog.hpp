@@ -394,6 +394,13 @@ public:
 		lock_guard<mutex> guard(commit_lock);
 		last_committed_snapshot = value;
 	}
+	//! Declares this catalog the only writer of its metadata, which then knows the latest snapshot after it read or
+	//! committed it, without asking the metadata again
+	void SetSingleWriter(bool value);
+	//! The latest snapshot of a single writer, nullptr if it is not known
+	unique_ptr<DuckLakeSnapshot> GetKnownSnapshot() const;
+	//! Keeps the snapshot of a single writer as the latest one if it is newer than the known one
+	void SetKnownSnapshot(const DuckLakeSnapshot &snapshot);
 	//! Keeps the oids of committed entries for when they are loaded
 	void SetEntryOids(const ducklake_entry_oids_t &oids);
 
@@ -596,6 +603,9 @@ private:
 	//! The id of the last committed snapshot, set at FlushChanges on a successful commit
 	mutable mutex commit_lock;
 	optional_idx last_committed_snapshot;
+	//! Whether this catalog is the only writer of its metadata, and the latest snapshot it knows then
+	bool single_writer = false;
+	DuckLakeSnapshot known_snapshot;
 	//! Serializes metadata statements on the shared metadata connection
 	std::recursive_mutex metadata_query_lock;
 	//! Optional callback for instrumenting metadata queries
