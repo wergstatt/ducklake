@@ -8,6 +8,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/main/database_manager.hpp"
+#include "duckdb/main/settings.hpp"
 #include "duckdb/planner/tableref/bound_at_clause.hpp"
 #include "ducklake_extension.hpp"
 #include "functions/ducklake_table_functions.hpp"
@@ -449,6 +450,9 @@ static map<string, string> ToStringMap(const Value &value) {
 
 static unique_ptr<FunctionData> DuckLakeRESTServeBind(ClientContext &context, TableFunctionBindInput &input,
                                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
+	if (!Settings::Get<EnableExternalAccessSetting>(context)) {
+		throw PermissionException("Cannot start a DuckLake REST server - external access is disabled by configuration");
+	}
 	auto target = input.inputs[0];
 	if (target.IsNull()) {
 		throw BinderException("ducklake_rest_serve: the catalog cannot be NULL");

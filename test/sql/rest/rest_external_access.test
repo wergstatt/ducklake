@@ -1,0 +1,25 @@
+# name: test/sql/rest/rest_external_access.test
+# description: A database without external access cannot start a DuckLake REST server
+# group: [rest]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/{BASE_TEST_NAME}.db' AS lake (DATA_PATH '{TEST_DIR}/{BASE_TEST_NAME}_files')
+
+statement ok
+SET enable_external_access = false
+
+# it opens a port for a catalog of the database
+statement error
+SELECT * FROM ducklake_rest_serve('lake')
+----
+Permission Error: Cannot start a DuckLake REST server - external access is disabled by configuration
+
+# and attaches a DuckLake at a path that the database cannot attach
+statement error
+SELECT * FROM ducklake_rest_serve('ducklake:{TEST_DIR}/{BASE_TEST_NAME}_isolated.db')
+----
+Permission Error: Cannot start a DuckLake REST server - external access is disabled by configuration
