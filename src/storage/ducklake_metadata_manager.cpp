@@ -1048,6 +1048,7 @@ SELECT
   (SELECT %s FROM {METADATA_CATALOG}.ducklake_delete_file del
             JOIN {METADATA_CATALOG}.ducklake_data_file data ON del.data_file_id = data.data_file_id
             WHERE del.table_id = {TABLE_ID}
+              AND data.table_id = {TABLE_ID}
               AND {SNAPSHOT_ID} >= del.begin_snapshot
               AND ({SNAPSHOT_ID} < del.end_snapshot OR del.end_snapshot IS NULL)
               AND {SNAPSHOT_ID} >= data.begin_snapshot
