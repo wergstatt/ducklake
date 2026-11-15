@@ -5043,12 +5043,12 @@ SELECT DISTINCT c.column_id
 FROM (VALUES %s) c(column_id, values_from)
 CROSS JOIN {METADATA_CATALOG}.ducklake_data_file f
 LEFT JOIN {METADATA_CATALOG}.ducklake_file_column_stats s
-    ON s.data_file_id = f.data_file_id AND s.column_id = c.column_id
+    ON s.data_file_id = f.data_file_id AND s.column_id = c.column_id AND s.table_id = %d
 WHERE f.table_id = %d AND f.end_snapshot IS NULL AND CASE
     WHEN s.data_file_id IS NULL THEN COALESCE(f.partial_max, f.begin_snapshot) >= c.values_from
     ELSE s.value_count IS NULL OR s.value_count > 0
 END)",
-	                          StringUtil::Join(column_values, ", "), table_id.index);
+	                          StringUtil::Join(column_values, ", "), table_id.index, table_id.index);
 }
 
 string DuckLakeMetadataManager::GetColumnDefaultsSql(TableIndex table_id, const set<FieldIndex> &column_ids) {
