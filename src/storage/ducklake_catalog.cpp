@@ -1181,8 +1181,8 @@ shared_ptr<DuckLakeTableStats> DuckLakeCatalog::GetTableStats(DuckLakeTransactio
 	return shared_ptr<DuckLakeTableStats>(std::move(requested_entry), &raw->stats);
 }
 
-optional_idx DuckLakeCatalog::GetTableNetRowCount(DuckLakeTransaction &transaction, DuckLakeTableEntry &table) {
-	auto snapshot = transaction.GetSnapshot();
+optional_idx DuckLakeCatalog::GetTableNetRowCount(DuckLakeTransaction &transaction, DuckLakeTableEntry &table,
+                                                  DuckLakeSnapshot snapshot) {
 	auto key = NetRowCountCacheKey(table.GetTableId());
 	auto cached = GetObjectCacheInstance().Get<DuckLakeTableNetRowCountCacheEntry>(key);
 	if (cached && cached->snapshot_id == snapshot.snapshot_id) {

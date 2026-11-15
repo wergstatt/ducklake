@@ -212,7 +212,7 @@ vector<PartitionStatistics> DuckLakeGetPartitionStats(ClientContext &context, Ge
 		return result;
 	}
 
-	auto row_count = transaction->GetCatalog().GetTableNetRowCount(*transaction, table);
+	auto row_count = transaction->GetCatalog().GetTableNetRowCount(*transaction, table, transaction->GetSnapshot());
 	if (!row_count.IsValid()) {
 		return result;
 	}

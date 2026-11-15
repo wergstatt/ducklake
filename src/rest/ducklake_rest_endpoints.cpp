@@ -506,11 +506,12 @@ static bool TryGetMinMax(const DuckLakeColumnStats &column_stats, bool is_min, V
 //! Answers aggregates over a table from its statistics where that is exact, and returns whether all were answered
 static bool AnswerAggregates(DuckLakeRESTRequest &request, DuckLakeTableEntry &table, DuckLakeSnapshot snapshot,
                              const vector<RESTAggregate> &aggregates, vector<RESTAggregateResult> &results) {
-	auto net_count = request.GetMetadataManager().GetNetRowCount(table, snapshot);
-	// the statistics of the table are the ones of the latest snapshot
-	bool is_latest = snapshot.snapshot_id == request.transaction->GetSnapshot().snapshot_id;
+	auto net_count = request.catalog->GetTableNetRowCount(*request.transaction, table, snapshot);
+	// only the aggregates over a column need the statistics of the table, which are the ones of the latest snapshot
+	bool needs_stats = std::any_of(aggregates.begin(), aggregates.end(),
+	                               [](const RESTAggregate &aggregate) { return aggregate.function != "count_star"; });
 	shared_ptr<DuckLakeTableStats> table_stats;
-	if (is_latest) {
+	if (needs_stats && snapshot.snapshot_id == request.transaction->GetSnapshot().snapshot_id) {
 		table_stats = table.GetTableStats(*request.transaction);
 	}
 	// the bounds of the statistics only widen, they are exact if no row was ever deleted

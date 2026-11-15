@@ -1,0 +1,75 @@
+# name: test/sql/rest/rest_aggregates_from_cache.test
+# description: The server counts the rows of a snapshot once for the count_star aggregates of its scans
+# group: [rest]
+
+require json
+
+include test/template/rest_setup.test_template
+
+statement ok
+ATTACH 'ducklake:rest:{rest_server}' AS dl (DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE dl.t(i INTEGER)
+
+statement ok
+INSERT INTO dl.t FROM range(100)
+
+statement ok
+INSERT INTO dl.t FROM range(100, 200)
+
+statement ok rest_db:rest_server_con
+CALL enable_logging('DuckLakeMetadata')
+
+# the server counts the rows
+query II
+SELECT status, response->>'$.aggregate_results[0].value'
+FROM ducklake_rest_request('{rest_server}', 'POST', '/v1/tables/1/scan', '{"aggregates": [{"function": "count_star"}]}')
+----
+200	200
+
+query I rest_db:rest_server_con
+SELECT count(*) FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE query LIKE '%SUM(record_count)%'
+----
+1
+
+# it has the count of the snapshot and does not count the rows again, also for aggregates over columns
+query III
+SELECT status, response->>'$.aggregate_results[0].value', response->>'$.aggregate_results[1].value'
+FROM ducklake_rest_request('{rest_server}', 'POST', '/v1/tables/1/scan',
+'{"aggregates": [{"function": "count_star"}, {"function": "max", "column_id": 1}]}')
+----
+200	200	199
+
+query I rest_db:rest_server_con
+SELECT count(*) FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE query LIKE '%SUM(record_count)%'
+----
+1
+
+# a new snapshot has its own count
+statement ok
+INSERT INTO dl.t VALUES (1000)
+
+query II
+SELECT status, response->>'$.aggregate_results[0].value'
+FROM ducklake_rest_request('{rest_server}', 'POST', '/v1/tables/1/scan', '{"aggregates": [{"function": "count_star"}]}')
+----
+200	201
+
+# so does an earlier snapshot, which does not change the count of the latest one
+query II
+SELECT status, response->>'$.aggregate_results[0].value'
+FROM ducklake_rest_request('{rest_server}', 'POST', '/v1/tables/1/scan', '{"snapshot_id": 3, "aggregates": [{"function": "count_star"}]}')
+----
+200	200
+
+query II
+SELECT status, response->>'$.aggregate_results[0].value'
+FROM ducklake_rest_request('{rest_server}', 'POST', '/v1/tables/1/scan', '{"aggregates": [{"function": "count_star"}]}')
+----
+200	201
+
+statement ok
+DETACH dl
+
+include test/template/rest_teardown.test_template

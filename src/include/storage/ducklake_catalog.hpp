@@ -302,7 +302,8 @@ public:
 	                                             TableIndex table_id,
 	                                             optional_ptr<const vector<TableIndex>> load_tables = nullptr);
 	//! Returns an invalid index when a file is only partially visible to the snapshot
-	optional_idx GetTableNetRowCount(DuckLakeTransaction &transaction, DuckLakeTableEntry &table);
+	optional_idx GetTableNetRowCount(DuckLakeTransaction &transaction, DuckLakeTableEntry &table,
+	                                 DuckLakeSnapshot snapshot);
 	//! Returns zero when the table has no stats
 	idx_t GetTableRecordCount(DuckLakeTransaction &transaction, TableIndex table_id);
 
