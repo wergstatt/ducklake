@@ -45,7 +45,8 @@ DuckLakeMetadataManager &DuckLakeRESTRequest::GetMetadataManager() {
 
 DuckLakeSnapshot DuckLakeRESTRequest::GetSnapshotById(idx_t snapshot_id) {
 	BoundAtClause at_clause(Identifier("version"), Value::UBIGINT(snapshot_id));
-	return transaction->GetSnapshot(at_clause);
+	// the client names the snapshot, so the latest one is not read to see which snapshots the request can see
+	return *GetMetadataManager().GetSnapshot(at_clause, SnapshotBound::UPPER_BOUND, DConstants::INVALID_INDEX);
 }
 
 DuckLakeSnapshot DuckLakeRESTRequest::GetSnapshot(const DuckLakeSnapshot &snapshot, optional_idx snapshot_id) {

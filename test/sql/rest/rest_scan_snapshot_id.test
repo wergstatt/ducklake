@@ -1,0 +1,50 @@
+# name: test/sql/rest/rest_scan_snapshot_id.test
+# description: A scan that names its snapshot by id looks that snapshot up, without reading the latest snapshot as well
+# group: [rest]
+
+require json
+
+include test/template/rest_setup.test_template
+
+# a table with an inlined data table reads the latest snapshot to see whether the inlined table is superseded
+statement ok rest_db:rest_server_con
+CALL rest_lake.set_option('data_inlining_row_limit', 0)
+
+statement ok
+ATTACH 'ducklake:rest:{rest_server}' AS dl (DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE dl.t AS SELECT i FROM range(10) t(i)
+
+statement ok
+INSERT INTO dl.t VALUES (10)
+
+statement ok rest_db:rest_server_con
+CALL enable_logging('DuckLakeMetadata')
+
+# the first snapshot has one file, the latest has two
+query II
+SELECT status, json_array_length(response->'$.files')
+FROM ducklake_rest_request('{rest_server}', 'POST', '/v1/tables/1/scan', '{"snapshot_id": 1}')
+----
+200	1
+
+query I rest_db:rest_server_con
+SELECT count(*) FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE query LIKE '%MAX(snapshot_id)%'
+----
+0
+
+query II
+SELECT status, json_array_length(response->'$.files')
+FROM ducklake_rest_request('{rest_server}', 'POST', '/v1/tables/1/scan', '{"snapshot_id": 2}')
+----
+200	2
+
+# a snapshot that does not exist
+query II
+SELECT status, response->>'$.error.message'
+FROM ducklake_rest_request('{rest_server}', 'POST', '/v1/tables/1/scan', '{"snapshot_id": 1000}')
+----
+400	No snapshot found at version 1000
+
+include test/template/rest_teardown.test_template
