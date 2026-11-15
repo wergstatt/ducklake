@@ -1,0 +1,70 @@
+# name: test/sql/rest/rest_table_changes_requests.test
+# description: The scans of a change feed that read the same changes do not ask the REST server for them again
+# group: [rest]
+
+include test/template/rest_setup.test_template
+
+statement ok
+ATTACH 'ducklake:rest:{rest_server}' AS dl (DATA_INLINING_ROW_LIMIT 10)
+
+statement ok
+CREATE TABLE dl.t(i INTEGER)
+
+statement ok
+INSERT INTO dl.t SELECT * FROM range(100)
+
+statement ok
+INSERT INTO dl.t VALUES (1000), (2000)
+
+statement ok
+DELETE FROM dl.t WHERE i < 10
+
+statement ok
+SET VARIABLE latest = (SELECT id FROM ducklake_current_snapshot('dl'))
+
+statement ok rest_db:rest_server_con
+CALL enable_logging('DuckLakeMetadata')
+
+query I
+SELECT count(*) FROM ducklake_table_changes('dl', 'main', 't', 0, getvariable('latest'))
+----
+112
+
+# the scans of the insertions read the same changes, which the deletions read again with all columns
+query II rest_db:rest_server_con
+SELECT count(*) FILTER (WHERE query LIKE '%data.path AS data_path%' AND query NOT LIKE '%inlined_dels%'),
+       count(*) FILTER (WHERE query LIKE '%inlined_dels%')
+FROM duckdb_logs_parsed('DuckLakeMetadata')
+----
+1	2
+
+# the scans of one transaction ask for the changes once
+statement ok rest_db:rest_server_con
+CALL truncate_duckdb_logs()
+
+statement ok
+BEGIN
+
+query I
+SELECT sum(i) FROM ducklake_table_insertions('dl', 'main', 't', 0, getvariable('latest'))
+----
+7950
+
+query I
+SELECT count(*) FROM ducklake_table_insertions('dl', 'main', 't', 0, getvariable('latest'))
+----
+102
+
+statement ok
+COMMIT
+
+query I rest_db:rest_server_con
+SELECT count(*) FROM duckdb_logs_parsed('DuckLakeMetadata')
+WHERE query LIKE '%data.path AS data_path%' AND query NOT LIKE '%inlined_dels%'
+----
+1
+
+statement ok
+DETACH dl
+
+include test/template/rest_teardown.test_template

@@ -772,7 +772,7 @@ vector<DuckLakeColumnMappingInfo> RESTMetadataManager::GetColumnMappings(optiona
 	return {};
 }
 
-RESTTableChangesResponse
+shared_ptr<RESTTableChangesResponse>
 RESTMetadataManager::GetTableChanges(DuckLakeTableEntry &table, DuckLakeSnapshot start_snapshot,
                                      DuckLakeSnapshot snapshot, const string &changes,
                                      optional_ptr<const vector<DuckLakeProjectedColumn>> projection) {
@@ -784,6 +784,14 @@ RESTMetadataManager::GetTableChanges(DuckLakeTableEntry &table, DuckLakeSnapshot
 	auto kind = changes == "insertions" ? RESTInlinedRowsKind::INSERTIONS : RESTInlinedRowsKind::DELETIONS;
 	RESTInlinedRowsKey inlined_key {kind, start_snapshot.snapshot_id, snapshot.snapshot_id, table.GetTableId().index};
 	auto plan = PlanInlinedRows(inlined_key, projection);
+	if (!plan.fetch) {
+		// an earlier scan of the change feed read the changes with these columns
+		lock_guard<mutex> guard(cache_lock);
+		auto entry = changes_cache.find(inlined_key);
+		if (entry != changes_cache.end()) {
+			return entry->second;
+		}
+	}
 	SetProjection(request, plan);
 	request.known_column_mappings = transaction.GetCatalog().GetLoadedNameMapIds();
 	auto response = GetClient().TableChanges(request);
@@ -803,7 +811,10 @@ RESTMetadataManager::GetTableChanges(DuckLakeTableEntry &table, DuckLakeSnapshot
 	if (plan.fetch) {
 		inlined_rows_cache.Add(inlined_key, plan.projection, std::move(response.inlined_data));
 	}
-	return response;
+	auto result = make_shared_ptr<RESTTableChangesResponse>(std::move(response));
+	lock_guard<mutex> guard(cache_lock);
+	changes_cache[inlined_key] = result;
+	return result;
 }
 
 vector<DuckLakeFileListEntry>
@@ -811,7 +822,7 @@ RESTMetadataManager::GetTableInsertions(DuckLakeTableEntry &table, DuckLakeSnaps
                                         DuckLakeSnapshot snapshot,
                                         optional_ptr<const vector<DuckLakeProjectedColumn>> projection) {
 	D_ASSERT(!IsTransactionLocal(table.GetTableId()));
-	return std::move(GetTableChanges(table, start_snapshot, snapshot, "insertions", projection).insertions);
+	return GetTableChanges(table, start_snapshot, snapshot, "insertions", projection)->insertions;
 }
 
 vector<DuckLakeDeleteScanEntry>
@@ -819,7 +830,7 @@ RESTMetadataManager::GetTableDeletions(DuckLakeTableEntry &table, DuckLakeSnapsh
                                        DuckLakeSnapshot snapshot, bool include_local_changes,
                                        optional_ptr<const vector<DuckLakeProjectedColumn>> projection) {
 	D_ASSERT(!IsTransactionLocal(table.GetTableId()));
-	return std::move(GetTableChanges(table, start_snapshot, snapshot, "deletions", projection).deletions);
+	return GetTableChanges(table, start_snapshot, snapshot, "deletions", projection)->deletions;
 }
 
 // LCOV_EXCL_START

@@ -141,9 +141,9 @@ private:
 	RESTSnapshotData GetSnapshotData(DuckLakeSnapshot snapshot, bool include_catalog, bool include_stats);
 	void AddDeletes(const TransactionChangeInformation &changes, vector<unique_ptr<RESTCommitRequest>> &requests);
 	void AddInserts(const TransactionChangeInformation &changes, vector<unique_ptr<RESTCommitRequest>> &requests);
-	RESTTableChangesResponse GetTableChanges(DuckLakeTableEntry &table, DuckLakeSnapshot start_snapshot,
-	                                         DuckLakeSnapshot snapshot, const string &changes,
-	                                         optional_ptr<const vector<DuckLakeProjectedColumn>> projection);
+	shared_ptr<RESTTableChangesResponse>
+	GetTableChanges(DuckLakeTableEntry &table, DuckLakeSnapshot start_snapshot, DuckLakeSnapshot snapshot,
+	                const string &changes, optional_ptr<const vector<DuckLakeProjectedColumn>> projection);
 	vector<RESTDroppedFile> GetDroppedFiles(TableIndex table_id);
 
 private:
@@ -159,6 +159,8 @@ private:
 	idx_t prefetched_metadata_version = DConstants::INVALID_INDEX;
 	//! The inlined rows that came along with file lists, which scans read the columns they need from
 	RESTInlinedRowsCache inlined_rows_cache;
+	//! The changes that the transaction read, as a change feed reads the same changes more than once
+	map<RESTInlinedRowsKey, shared_ptr<RESTTableChangesResponse>> changes_cache;
 	//! The table statistics read by the transaction, by snapshot
 	unordered_map<idx_t, vector<DuckLakeGlobalStatsInfo>> table_stats;
 	//! The data files dropped by the transaction, by table
