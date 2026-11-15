@@ -486,6 +486,7 @@
         "test/sql/stats/table_stats_null_totals.test",
         "test/sql/stats/table_stats_null_totals_retry.test",
         "test/sql/stats/table_stats_without_column_stats.test",
+        "test/sql/stats/truncate_stats_other_catalog.test",
         "test/sql/stats/variant_null_counts.test",
         "test/sql/stats/variant_shredded_stats.test",
         "test/sql/stats/variant_stats_large_counts.test",

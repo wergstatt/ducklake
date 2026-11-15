@@ -1,0 +1,43 @@
+# name: test/sql/stats/truncate_stats_other_catalog.test
+# description: A table that another catalog of the lake truncated does not keep the stats that this catalog cached
+# group: [stats]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/truncate_stats_other_catalog.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/truncate_stats_other_catalog', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS other (METADATA_CATALOG '__ducklake_metadata_ducklake')
+
+statement ok
+CREATE TABLE ducklake.t AS SELECT i FROM range(100) t(i)
+
+# this catalog caches the stats of the table
+query I
+SELECT count(*) FROM ducklake.t WHERE i < 50
+----
+50
+
+statement ok
+DELETE FROM other.t
+
+query II
+EXPLAIN SELECT * FROM ducklake.t
+----
+physical_plan	<REGEX>:.*~0 rows.*
+
+# the stats that a commit writes count only its rows
+statement ok
+INSERT INTO ducklake.t VALUES (1000)
+
+query III
+SELECT s.record_count, c.min_value::BIGINT, c.max_value::BIGINT FROM __ducklake_metadata_ducklake.ducklake_table_stats s JOIN __ducklake_metadata_ducklake.ducklake_table_column_stats c USING (table_id)
+----
+1	1000	1000

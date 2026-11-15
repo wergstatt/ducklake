@@ -1,0 +1,36 @@
+# name: test/sql/rest/rest_truncate_stats.test
+# description: A client does not keep the stats of a table that another client truncated
+# group: [rest]
+
+include test/template/rest_setup.test_template
+
+statement ok
+ATTACH 'ducklake:rest:{rest_server}' AS dl (DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+ATTACH 'ducklake:rest:{rest_server}' AS other (DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE dl.t AS SELECT i FROM range(100) t(i)
+
+# this client reads the stats of the table
+query I
+SELECT count(*) FROM dl.t WHERE i < 50
+----
+50
+
+statement ok
+DELETE FROM other.t
+
+query II
+EXPLAIN SELECT * FROM dl.t
+----
+physical_plan	<REGEX>:.*~0 rows.*
+
+statement ok
+DETACH dl
+
+statement ok
+DETACH other
+
+include test/template/rest_teardown.test_template

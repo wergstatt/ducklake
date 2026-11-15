@@ -1394,7 +1394,7 @@ void DuckLakeTransactionState::InitializeGlobalStats(TableIndex table_id, const 
 
 string DuckLakeTransactionState::UpdateStatsForDroppedFiles(
     optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats, const DuckLakeCommitContext &context,
-    map<TableIndex, DroppedDataFileStats> &attempt_dropped_file_stats, bool &recomputed_stats) {
+    map<TableIndex, DroppedDataFileStats> &attempt_dropped_file_stats) {
 	if (attempt_dropped_file_stats.empty()) {
 		return string();
 	}
@@ -1437,7 +1437,6 @@ string DuckLakeTransactionState::UpdateStatsForDroppedFiles(
 		    TryRecomputeGlobalStatsAfterDrop(table_id, dropped_row_count, context, recomputed)) {
 			// the remaining files are delete-free, so their stats describe the live rows exactly
 			result += RecomputedGlobalStatsSql(table_id, std::move(recomputed), context);
-			recomputed_stats = true;
 			continue;
 		}
 		result += WriteGlobalTableStatsSql(table_id, new_globals, delete_column_stats, context);
@@ -2524,9 +2523,9 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
 			dropped_indexes.insert(entry.second);
 		}
 		batch_queries += DuckLakeMetadataManager::DropDataFiles(dropped_indexes);
-		bool recomputed_stats = false;
-		batch_queries += UpdateStatsForDroppedFiles(stats, context, attempt_dropped_file_stats, recomputed_stats);
-		if (recomputed_stats && commit_snapshot.next_file_id == initial_next_file_id) {
+		auto dropped_stats_sql = UpdateStatsForDroppedFiles(stats, context, attempt_dropped_file_stats);
+		batch_queries += dropped_stats_sql;
+		if (!dropped_stats_sql.empty() && commit_snapshot.next_file_id == initial_next_file_id) {
 			// cached stats are keyed by the next file id, which a commit without new files keeps
 			commit_snapshot.next_file_id++;
 		}
