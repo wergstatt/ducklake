@@ -5014,7 +5014,7 @@ string DuckLakeMetadataManager::GetColumnsWithRecordedValuesSql(TableIndex table
 SELECT s.column_id
 FROM {METADATA_CATALOG}.ducklake_file_column_stats s
 JOIN {METADATA_CATALOG}.ducklake_data_file f ON f.data_file_id = s.data_file_id AND f.end_snapshot IS NULL
-WHERE s.table_id = %d AND s.column_id IN (%s) AND (s.value_count IS NULL OR s.value_count > 0)
+WHERE s.table_id = %d AND f.table_id = %d AND s.column_id IN (%s) AND (s.value_count IS NULL OR s.value_count > 0)
 UNION ALL
 SELECT c.column_id
 FROM {METADATA_CATALOG}.ducklake_column c
@@ -5022,7 +5022,7 @@ JOIN {METADATA_CATALOG}.ducklake_data_file f
     ON f.table_id = c.table_id AND f.end_snapshot IS NULL
     AND COALESCE(f.partial_max, f.begin_snapshot) < c.begin_snapshot
 WHERE c.table_id = %d AND c.column_id IN (%s) AND c.initial_default IS NOT NULL)",
-	                              table_id.index, ids, table_id.index, ids);
+	                              table_id.index, table_id.index, ids, table_id.index, ids);
 	if (column_ids.size() == 1) {
 		return sql + "\nLIMIT 1";
 	}

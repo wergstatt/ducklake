@@ -1,0 +1,64 @@
+# name: test/sql/stats/recorded_values_table_filter.test
+# description: The check for live files with values of a column only scans the data files of that table
+# group: [stats]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/recorded_values_table_filter', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE ducklake.other(i INTEGER)
+
+statement ok
+INSERT INTO ducklake.other FROM range(10)
+
+statement ok
+INSERT INTO ducklake.other FROM range(10, 20)
+
+statement ok
+CREATE TABLE ducklake.t(c INTEGER)
+
+# the column has no values yet, its bounds are unknown
+statement ok
+INSERT INTO ducklake.t VALUES (NULL)
+
+statement ok
+DETACH ducklake
+
+statement ok
+CALL enable_logging(level = 'debug', storage = 'memory')
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/recorded_values_table_filter', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+statement ok
+CALL truncate_duckdb_logs()
+
+# the commit checks whether a live file of the table has values of the column
+statement ok
+INSERT INTO t VALUES (1)
+
+# Every scan of the data files that Postgres receives for the check is limited to the table (table_id 2)
+query I
+SELECT CASE WHEN (SELECT catalog_type FROM settings()) = 'postgres' THEN
+	(SELECT count(*) > 0 AND bool_and(contains(query, '"table_id" = 2'))
+	 FROM (SELECT message AS query FROM duckdb_logs WHERE type = 'PostgresQueryLog') logs
+	 WHERE contains(query, '"ducklake_data_file" '))
+	ELSE true END
+----
+true
+
+query II
+SELECT min(c), max(c) FROM t
+----
+1	1
