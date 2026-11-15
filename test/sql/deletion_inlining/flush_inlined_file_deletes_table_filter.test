@@ -1,0 +1,73 @@
+# name: test/sql/deletion_inlining/flush_inlined_file_deletes_table_filter.test
+# description: Flushing the inlined file deletions of a table only scans the data files of that table
+# group: [deletion_inlining]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/flush_inlined_file_deletes_table_filter', DATA_INLINING_ROW_LIMIT 10)
+
+statement ok
+CREATE TABLE ducklake.other(i INTEGER)
+
+statement ok
+INSERT INTO ducklake.other FROM range(20)
+
+statement ok
+INSERT INTO ducklake.other FROM range(20, 40)
+
+statement ok
+DELETE FROM ducklake.other WHERE i < 3
+
+statement ok
+CREATE TABLE ducklake.t(i INTEGER)
+
+statement ok
+INSERT INTO ducklake.t FROM range(20)
+
+statement ok
+DELETE FROM ducklake.t WHERE i < 3
+
+statement ok
+DETACH ducklake
+
+statement ok
+CALL enable_logging(level = 'debug', storage = 'memory')
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/flush_inlined_file_deletes_table_filter', DATA_INLINING_ROW_LIMIT 10)
+
+statement ok
+USE ducklake
+
+statement ok
+CALL truncate_duckdb_logs()
+
+statement ok
+CALL ducklake_flush_inlined_data('ducklake', table_name => 't')
+
+# Every scan of the data files that Postgres receives for the inlined deletions is limited to the table (table_id 2)
+query I
+SELECT CASE WHEN (SELECT catalog_type FROM settings()) = 'postgres' THEN
+	(SELECT count(*) > 0 AND bool_and(contains(query, '"table_id" = 2'))
+	 FROM (SELECT message AS query FROM duckdb_logs WHERE type = 'PostgresQueryLog') logs
+	 WHERE contains(query, '"ducklake_data_file" '))
+	ELSE true END
+----
+true
+
+query I
+SELECT count(*) FROM t
+----
+17
+
+query I
+SELECT count(*) FROM other
+----
+37

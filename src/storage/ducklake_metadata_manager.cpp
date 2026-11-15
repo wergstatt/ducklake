@@ -4468,7 +4468,7 @@ SELECT del.file_id, data.path, data.path_is_relative, del.row_id, del.begin_snap
        existing_del.begin_snapshot as del_begin_snapshot, existing_del.encryption_key as del_encryption_key,
        existing_del.format as del_format
 FROM {METADATA_CATALOG}.%s del
-JOIN {METADATA_CATALOG}.ducklake_data_file data ON del.file_id = data.data_file_id
+JOIN {METADATA_CATALOG}.ducklake_data_file data ON del.file_id = data.data_file_id AND data.table_id = %d
 LEFT JOIN {METADATA_CATALOG}.ducklake_delete_file existing_del
     ON del.file_id = existing_del.data_file_id AND existing_del.table_id = %d
        AND {SNAPSHOT_ID} >= existing_del.begin_snapshot
@@ -4476,7 +4476,7 @@ LEFT JOIN {METADATA_CATALOG}.ducklake_delete_file existing_del
             OR existing_del.end_snapshot >= COALESCE(data.end_snapshot, {SNAPSHOT_ID} + 1))
 WHERE del.begin_snapshot <= {SNAPSHOT_ID}
 	)",
-	                                                 inlined_table_name, table_id.index));
+	                                                 inlined_table_name, table_id.index, table_id.index));
 	result->ThrowIfError("Failed to query inlined file deletions for flush: ");
 	auto &separator = transaction.GetCatalog().Separator();
 	for (auto &row : *result) {
