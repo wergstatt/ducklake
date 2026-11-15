@@ -230,7 +230,7 @@ Parameters in the URL (the other fields of the request are the JSON body):
 | `include_catalog` | query | `bool` | Return the catalog of the snapshot. |
 | `include_stats` | query | `bool` | Return the table statistics of the snapshot. |
 | `cached_metadata_version` | query | `uint64` | The schema version of the latest catalog the client has loaded. If the snapshot has a different schema version, its catalog is returned. |
-| `cached_data_version` | query | `uint64` | The next file id of the snapshot of the latest statistics the client has loaded. If the snapshot has a different next file id, its statistics are returned. |
+| `cached_data_version` | query | `uint64` | The next file id of the snapshot of the latest statistics the client has loaded. If the snapshot has a different next file id, or a different schema version than `cached_metadata_version`, its statistics are returned. |
 
 Request: no body.
 
@@ -262,7 +262,7 @@ Parameters in the URL (the other fields of the request are the JSON body):
 | `include_catalog` | query | `bool` | Return the catalog of the snapshot. |
 | `include_stats` | query | `bool` | Return the table statistics of the snapshot. |
 | `cached_metadata_version` | query | `uint64` | The schema version of the latest catalog the client has loaded. If the snapshot has a different schema version, its catalog is returned. |
-| `cached_data_version` | query | `uint64` | The next file id of the snapshot of the latest statistics the client has loaded. If the snapshot has a different next file id, its statistics are returned. |
+| `cached_data_version` | query | `uint64` | The next file id of the snapshot of the latest statistics the client has loaded. If the snapshot has a different next file id, or a different schema version than `cached_metadata_version`, its statistics are returned. |
 | `unit` | query | [`AtUnit`](#atunit) | The unit of the value of the `AT` clause. |
 | `value` | query | `string` | The snapshot id or the name of a snapshot tag (for `version`), or the timestamp (for `timestamp`). |
 | `bound` | query | [`SnapshotBound`](#snapshotbound) | Whether a timestamp finds the last snapshot before or the first snapshot after it. |
@@ -1418,7 +1418,7 @@ What a request for a snapshot returns besides the snapshot.
 | `include_catalog` | `bool` (default `false`) | Return the catalog of the snapshot. |
 | `include_stats` | `bool` (default `false`) | Return the table statistics of the snapshot. |
 | `cached_metadata_version` | `uint64` (optional) | The schema version of the latest catalog the client has loaded. If the snapshot has a different schema version, its catalog is returned. |
-| `cached_data_version` | `uint64` (optional) | The next file id of the snapshot of the latest statistics the client has loaded. If the snapshot has a different next file id, its statistics are returned. |
+| `cached_data_version` | `uint64` (optional) | The next file id of the snapshot of the latest statistics the client has loaded. If the snapshot has a different next file id, or a different schema version than `cached_metadata_version`, its statistics are returned. |
 
 ### `SnapshotInfo`
 

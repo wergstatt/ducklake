@@ -1,0 +1,40 @@
+# name: test/sql/rest/rest_stats_after_ddl.test
+# description: A client that has loaded the statistics gets them with the catalog of a new schema version
+# group: [rest]
+
+include test/template/rest_setup.test_template
+
+statement ok
+ATTACH 'ducklake:rest:{rest_server}' AS dl
+
+statement ok
+CREATE TABLE dl.t(i INTEGER)
+
+statement ok
+INSERT INTO dl.t SELECT * FROM range(100)
+
+# the client loads the statistics of the table
+query I
+SELECT i FROM dl.t WHERE i > 98
+----
+99
+
+statement ok
+ALTER TABLE dl.t ADD COLUMN j INTEGER
+
+statement ok rest_db:rest_server_con
+CALL enable_logging('DuckLakeMetadata')
+
+# the statistics come with the new catalog, the client does not ask for the snapshot again
+query II
+SELECT i, j FROM dl.t WHERE i > 98
+----
+99	NULL
+
+query II rest_db:rest_server_con
+SELECT count(*) FILTER (WHERE regexp_matches(query, 'next_file_id\s+FROM')), count(*) FILTER (WHERE query LIKE '%next_row_id, file_size_bytes%')
+FROM duckdb_logs_parsed('DuckLakeMetadata')
+----
+0	1
+
+include test/template/rest_teardown.test_template

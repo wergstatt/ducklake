@@ -102,7 +102,8 @@ structure SnapshotIncludes {
     cached_metadata_version: UInt64
 
     /// The next file id of the snapshot of the latest statistics the client has loaded. If the snapshot has a
-    /// different next file id, its statistics are returned.
+    /// different next file id, or a different schema version than `cached_metadata_version`, its statistics are
+    /// returned.
     @httpQuery("cached_data_version")
     cached_data_version: UInt64
 }

@@ -167,12 +167,14 @@ static void AddSnapshotData(DuckLakeRESTRequest &request, const RESTSnapshotIncl
                             RESTSnapshotData &result) {
 	auto &metadata_manager = request.GetMetadataManager();
 	auto &snapshot = result.snapshot;
-	// clients that pass the versions they have loaded get the catalog and statistics if they changed
-	bool include_catalog =
-	    includes.include_catalog || (includes.cached_metadata_version.IsValid() &&
-	                                 includes.cached_metadata_version.GetIndex() != snapshot.schema_version);
-	bool include_stats = includes.include_stats || (includes.cached_data_version.IsValid() &&
-	                                                includes.cached_data_version.GetIndex() != snapshot.next_file_id);
+	// clients that pass the versions they have loaded get the catalog and statistics if they changed, and statistics
+	// with a new catalog, as clients read the statistics with the schema
+	bool schema_changed = includes.cached_metadata_version.IsValid() &&
+	                      includes.cached_metadata_version.GetIndex() != snapshot.schema_version;
+	bool include_catalog = includes.include_catalog || schema_changed;
+	bool include_stats = includes.include_stats ||
+	                     (includes.cached_data_version.IsValid() &&
+	                      (schema_changed || includes.cached_data_version.GetIndex() != snapshot.next_file_id));
 	if (include_catalog) {
 		result.catalog = make_uniq<DuckLakeCatalogInfo>(metadata_manager.GetCatalogForSnapshot(snapshot));
 		auto next_column_ids = metadata_manager.GetNextColumnIds();
