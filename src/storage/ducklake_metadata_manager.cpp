@@ -2499,7 +2499,8 @@ string DuckLakeMetadataManager::GenerateFileListQuery(DuckLakeTableEntry &table,
 		              ", del.begin_snapshot";
 	} else {
 		select_list = "data.data_file_id, " + GetDataFileSelectList("data") +
-		              ", data.row_id_start, data.begin_snapshot, data.partial_max, data.mapping_id, " +
+		              ", data.row_id_start, data.begin_snapshot, data.partial_max, data.mapping_id, "
+		              "data.partition_id, " +
 		              GetDeleteFileSelectList("del") + stats_select_list;
 	}
 
@@ -2593,6 +2594,7 @@ DuckLakeMetadataManager::GetFilesForTable(DuckLakeTableEntry &table, DuckLakeSna
 			file_entry.mapping_id = MappingIndex(row.GetValue<idx_t>(col_idx));
 		}
 		col_idx++;
+		file_entry.partition_id = OptIdx(row, col_idx++);
 		file_entry.delete_file = ReadDeleteFile(table, row, col_idx, IsEncrypted());
 		for (auto &column_field_index : runtime_filter_stats_columns) {
 			DuckLakeFileColumnStats column_stats;
@@ -4197,21 +4199,20 @@ WHERE del.table_id=%d AND del.data_file_id IN (%s) AND {SNAPSHOT_ID} >= del.begi
 
 void DuckLakeMetadataManager::ReadFilePartitions(TableIndex table_id, DuckLakeSnapshot snapshot,
                                                  vector<DuckLakeFileListEntry> &files) {
-	if (files.empty()) {
-		return;
-	}
 	unordered_map<idx_t, idx_t> file_positions;
 	for (idx_t i = 0; i < files.size(); i++) {
-		file_positions[files[i].file_id.index] = i;
+		if (files[i].partition_id.IsValid()) {
+			file_positions[files[i].file_id.index] = i;
+		}
+	}
+	if (file_positions.empty()) {
+		return;
 	}
 	auto query = StringUtil::Format(R"(
-SELECT data.data_file_id, data.partition_id, value.partition_key_index, value.partition_value
-FROM {METADATA_CATALOG}.ducklake_data_file data
-JOIN {METADATA_CATALOG}.ducklake_file_partition_value value
-  ON value.data_file_id = data.data_file_id AND value.table_id = data.table_id
-WHERE data.table_id=%d AND {SNAPSHOT_ID} >= data.begin_snapshot
-  AND ({SNAPSHOT_ID} < data.end_snapshot OR data.end_snapshot IS NULL)
-ORDER BY data.data_file_id, value.partition_key_index)",
+SELECT data_file_id, partition_key_index, partition_value
+FROM {METADATA_CATALOG}.ducklake_file_partition_value
+WHERE table_id=%d
+ORDER BY data_file_id, partition_key_index)",
 	                                table_id.index);
 	auto result = Query(snapshot, query);
 	result->ThrowIfError("Failed to read the partition values of the files from DuckLake: ");
@@ -4220,14 +4221,10 @@ ORDER BY data.data_file_id, value.partition_key_index)",
 		if (position == file_positions.end()) {
 			continue;
 		}
-		auto &file = files[position->second];
-		if (!row.IsNull(1)) {
-			file.partition_id = row.GetValue<idx_t>(1);
-		}
 		DuckLakeFilePartition partition_value;
-		partition_value.partition_column_idx = row.GetValue<idx_t>(2);
-		partition_value.partition_value = row.IsNull(3) ? Value(LogicalType::VARCHAR) : Value(row.GetValue<string>(3));
-		file.partition_values.push_back(std::move(partition_value));
+		partition_value.partition_column_idx = row.GetValue<idx_t>(1);
+		partition_value.partition_value = row.IsNull(2) ? Value(LogicalType::VARCHAR) : Value(row.GetValue<string>(2));
+		files[position->second].partition_values.push_back(std::move(partition_value));
 	}
 }
 

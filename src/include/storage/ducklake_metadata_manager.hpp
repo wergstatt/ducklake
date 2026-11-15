@@ -877,7 +877,7 @@ public:
 	//! The delete files of data files of a table at a snapshot, by the id of the data file
 	map<idx_t, DuckLakeOverwrittenDeleteFile> GetDeleteFiles(DuckLakeTableEntry &table, DuckLakeSnapshot snapshot,
 	                                                         const set<idx_t> &data_file_ids);
-	//! Sets the partitioning and the partition values of the files of a table at a snapshot
+	//! Sets the partition values of the files of a table that were written with a partitioning
 	void ReadFilePartitions(TableIndex table_id, DuckLakeSnapshot snapshot, vector<DuckLakeFileListEntry> &files);
 	map<idx_t, set<idx_t>> ReadInlinedFileDeletions(TableIndex table_id, DuckLakeSnapshot snapshot,
 	                                                bool include_local_changes = true);

@@ -447,9 +447,9 @@ struct DuckLakeFileListEntry {
 	vector<idx_t> snapshot_filter_excluded;
 	MappingIndex mapping_id;
 	DuckLakeDataType data_type = DuckLakeDataType::DATA_FILE;
-	//! The partitioning the file was written with and the values of its partition keys, only set by
-	//! DuckLakeMetadataManager::ReadFilePartitions
+	//! The partitioning the file was written with
 	optional_idx partition_id;
+	//! The values of its partition keys, only set by DuckLakeMetadataManager::ReadFilePartitions
 	vector<DuckLakeFilePartition> partition_values;
 	//! The data file id
 	DataFileIndex file_id;

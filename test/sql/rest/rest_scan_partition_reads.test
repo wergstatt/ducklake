@@ -1,0 +1,181 @@
+# name: test/sql/rest/rest_scan_partition_reads.test
+# description: A scan reads the partition values only when a file of the scan was written with a partitioning
+# group: [rest]
+
+require json
+
+include test/template/rest_setup.test_template
+
+statement ok
+ATTACH 'ducklake:rest:{rest_server}' AS dl (DATA_INLINING_ROW_LIMIT 0)
+
+statement ok rest_db:rest_server_con
+CALL enable_logging('DuckLakeMetadata')
+
+# a table that was never partitioned
+statement ok
+CREATE TABLE dl.u(k INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO dl.u VALUES (1, 10), (2, 20)
+
+statement ok rest_db:rest_server_con
+CALL truncate_duckdb_logs()
+
+query I
+SELECT sum(v) FROM dl.u
+----
+30
+
+# the file list and no read of partition values
+query II rest_db:rest_server_con
+SELECT count(*) FILTER (WHERE query LIKE '%data.path AS data_path%') > 0,
+       count(*) FILTER (WHERE query LIKE '%ducklake_file_partition_value%' AND query NOT LIKE '%data.path AS data_path%')
+FROM duckdb_logs_parsed('DuckLakeMetadata')
+----
+true	0
+
+# a table that is partitioned
+statement ok
+CREATE TABLE dl.p(k INTEGER, v INTEGER)
+
+statement ok
+ALTER TABLE dl.p SET PARTITIONED BY (k)
+
+statement ok
+INSERT INTO dl.p VALUES (1, 10), (2, 20), (2, 21)
+
+statement ok
+SET VARIABLE p_id = (SELECT j->>'$.table_id' FROM (
+  SELECT unnest(from_json(response->'$.catalog.tables', '["JSON"]')) AS j
+  FROM ducklake_rest_request('{rest_server}', 'GET', '/v1/snapshots/latest?include_catalog=true', '')) WHERE j->>'$.table_name' = 'p')
+
+statement ok rest_db:rest_server_con
+CALL truncate_duckdb_logs()
+
+query I
+SELECT sum(v) FROM dl.p
+----
+51
+
+query II rest_db:rest_server_con
+SELECT count(*) FILTER (WHERE query LIKE '%data.path AS data_path%') > 0,
+       count(*) FILTER (WHERE query LIKE '%ducklake_file_partition_value%' AND query NOT LIKE '%data.path AS data_path%') =
+       count(*) FILTER (WHERE query LIKE '%data.path AS data_path%')
+FROM duckdb_logs_parsed('DuckLakeMetadata')
+----
+true	true
+
+query II
+SELECT partition_id IS NOT NULL, list_transform(partition_values, lambda x: x.partition_value) AS values
+FROM ducklake_rest_rows('{rest_server}', 'POST', '/v1/tables/' || getvariable('p_id') || '/scan', '{}', part := 'files') ORDER BY values
+----
+true	[1]
+true	[2]
+
+# a table that is not partitioned any more still has the files written when it was
+statement ok
+CREATE TABLE dl.r(k INTEGER, v INTEGER)
+
+statement ok
+ALTER TABLE dl.r SET PARTITIONED BY (k)
+
+statement ok
+INSERT INTO dl.r VALUES (1, 10), (2, 20)
+
+statement ok
+ALTER TABLE dl.r RESET PARTITIONED BY
+
+statement ok
+INSERT INTO dl.r VALUES (3, 30)
+
+statement ok
+SET VARIABLE r_id = (SELECT j->>'$.table_id' FROM (
+  SELECT unnest(from_json(response->'$.catalog.tables', '["JSON"]')) AS j
+  FROM ducklake_rest_request('{rest_server}', 'GET', '/v1/snapshots/latest?include_catalog=true', '')) WHERE j->>'$.table_name' = 'r')
+
+statement ok rest_db:rest_server_con
+CALL truncate_duckdb_logs()
+
+query I
+SELECT sum(v) FROM dl.r
+----
+60
+
+query II rest_db:rest_server_con
+SELECT count(*) FILTER (WHERE query LIKE '%data.path AS data_path%') > 0,
+       count(*) FILTER (WHERE query LIKE '%ducklake_file_partition_value%' AND query NOT LIKE '%data.path AS data_path%') =
+       count(*) FILTER (WHERE query LIKE '%data.path AS data_path%')
+FROM duckdb_logs_parsed('DuckLakeMetadata')
+----
+true	true
+
+query II
+SELECT partition_id IS NOT NULL, list_transform(partition_values, lambda x: x.partition_value) AS values
+FROM ducklake_rest_rows('{rest_server}', 'POST', '/v1/tables/' || getvariable('r_id') || '/scan', '{}', part := 'files') ORDER BY values
+----
+true	[1]
+true	[2]
+false	NULL
+
+# a filter that keeps a file of the old partitioning
+statement ok rest_db:rest_server_con
+CALL truncate_duckdb_logs()
+
+query II
+SELECT partition_id IS NOT NULL, list_transform(partition_values, lambda x: x.partition_value) AS values
+FROM ducklake_rest_rows('{rest_server}', 'POST', '/v1/tables/' || getvariable('r_id') || '/scan', '{"filters": {"expressions": ["k = 2"]}}', part := 'files')
+----
+true	[2]
+
+query I rest_db:rest_server_con
+SELECT count(*) FROM duckdb_logs_parsed('DuckLakeMetadata')
+WHERE query LIKE '%ducklake_file_partition_value%' AND query NOT LIKE '%data.path AS data_path%'
+----
+1
+
+# a filter that keeps the files of the table that were written without a partitioning
+statement ok rest_db:rest_server_con
+CALL truncate_duckdb_logs()
+
+query II
+SELECT partition_id IS NOT NULL, list_transform(partition_values, lambda x: x.partition_value) AS values
+FROM ducklake_rest_rows('{rest_server}', 'POST', '/v1/tables/' || getvariable('r_id') || '/scan', '{"filters": {"expressions": ["k = 3"]}}', part := 'files')
+----
+false	NULL
+
+query I rest_db:rest_server_con
+SELECT count(*) FROM duckdb_logs_parsed('DuckLakeMetadata')
+WHERE query LIKE '%ducklake_file_partition_value%' AND query NOT LIKE '%data.path AS data_path%'
+----
+0
+
+# a table that is partitioned, with files written before
+statement ok
+CREATE TABLE dl.l(k INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO dl.l VALUES (1, 10), (2, 20)
+
+statement ok
+ALTER TABLE dl.l SET PARTITIONED BY (k)
+
+statement ok rest_db:rest_server_con
+CALL truncate_duckdb_logs()
+
+query I
+SELECT sum(v) FROM dl.l
+----
+30
+
+query II rest_db:rest_server_con
+SELECT count(*) FILTER (WHERE query LIKE '%data.path AS data_path%') > 0,
+       count(*) FILTER (WHERE query LIKE '%ducklake_file_partition_value%' AND query NOT LIKE '%data.path AS data_path%')
+FROM duckdb_logs_parsed('DuckLakeMetadata')
+----
+true	0
+
+statement ok
+DETACH dl
+
+include test/template/rest_teardown.test_template
