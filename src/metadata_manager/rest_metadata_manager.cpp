@@ -250,8 +250,8 @@ DuckLakeCatalogInfo RESTMetadataManager::GetCatalogForSnapshot(DuckLakeSnapshot 
 			return result;
 		}
 	}
+	// the loaded version stays the one of the latest catalog, as the snapshot can be an earlier one
 	auto response = GetSnapshotData(snapshot, true, false);
-	client.loaded_metadata_version = snapshot.schema_version;
 	if (!response.catalog) {
 		// LCOV_EXCL_START
 		throw InvalidInputException("DuckLake REST: the server did not return the catalog of snapshot %llu",

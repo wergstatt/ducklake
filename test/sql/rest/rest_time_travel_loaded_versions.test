@@ -1,0 +1,57 @@
+# name: test/sql/rest/rest_time_travel_loaded_versions.test
+# description: Reading an earlier snapshot does not make the server send the latest catalog again
+# group: [rest]
+
+include test/template/rest_setup.test_template
+
+statement ok
+ATTACH 'ducklake:rest:{rest_server}' AS dl
+
+statement ok
+CREATE TABLE dl.t(i INTEGER)
+
+statement ok
+INSERT INTO dl.t VALUES (1)
+
+statement ok
+SET VARIABLE old_version = (SELECT id FROM ducklake_current_snapshot('dl'))
+
+# another schema version
+statement ok
+ALTER TABLE dl.t ADD COLUMN j INTEGER
+
+# a client that has not loaded any catalog
+statement ok
+ATTACH 'ducklake:rest:{rest_server}' AS other
+
+query II
+SELECT i, j FROM other.t
+----
+1	NULL
+
+# the catalog of the earlier schema version is loaded, which is not the one that the client has to keep track of
+query I
+SELECT i FROM other.t AT (VERSION => getvariable('old_version'))
+----
+1
+
+statement ok rest_db:rest_server_con
+CALL enable_logging('DuckLakeMetadata')
+
+query II
+SELECT i, j FROM other.t
+----
+1	NULL
+
+query II
+SELECT i, j FROM other.t
+----
+1	NULL
+
+# the server did not read the catalog again
+query I rest_db:rest_server_con
+SELECT count(*) FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE query LIKE '%schema_uuid::VARCHAR%'
+----
+0
+
+include test/template/rest_teardown.test_template
