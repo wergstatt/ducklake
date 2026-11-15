@@ -80,6 +80,8 @@ void DuckLakeRESTServer::AddCatalog(const string &prefix, shared_ptr<DatabaseIns
 static constexpr int64_t PLAN_EXPIRATION_SECONDS = 600;
 //! The number of plans that are kept
 static constexpr idx_t MAX_PLANS = 256;
+//! The number of entries that the plans keep together
+static constexpr idx_t MAX_PLAN_ENTRIES = 5000000;
 
 string DuckLakeRESTPlans::Add(shared_ptr<DuckLakeRESTPlan> plan) {
 	plan->created = std::chrono::steady_clock::now();
@@ -92,14 +94,19 @@ string DuckLakeRESTPlans::Add(shared_ptr<DuckLakeRESTPlan> plan) {
 			entry++;
 		}
 	}
-	while (plans.size() >= MAX_PLANS) {
-		// the oldest plan goes
+	idx_t entry_count = plan->EntryCount();
+	for (auto &entry : plans) {
+		entry_count += entry.second->EntryCount();
+	}
+	while (!plans.empty() && (plans.size() >= MAX_PLANS || entry_count > MAX_PLAN_ENTRIES)) {
+		// the oldest plan goes, the new plan stays
 		auto oldest = plans.begin();
 		for (auto entry = plans.begin(); entry != plans.end(); entry++) {
 			if (entry->second->created < oldest->second->created) {
 				oldest = entry;
 			}
 		}
+		entry_count -= oldest->second->EntryCount();
 		plans.erase(oldest);
 	}
 	plans.emplace(id, std::move(plan));

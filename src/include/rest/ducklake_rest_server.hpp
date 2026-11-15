@@ -70,6 +70,10 @@ struct DuckLakeRESTPlan {
 	vector<DuckLakeFileListEntry> insertions;
 	vector<DuckLakeDeleteScanEntry> deletions;
 	std::chrono::steady_clock::time_point created;
+
+	idx_t EntryCount() const {
+		return files.size() + extended_files.size() + insertions.size() + deletions.size();
+	}
 };
 
 class DuckLakeRESTPlans {
