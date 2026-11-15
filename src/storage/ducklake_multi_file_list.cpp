@@ -748,11 +748,19 @@ vector<DuckLakeFileListEntry> DuckLakeMultiFileList::ReadCommittedFiles(
 void DuckLakeMultiFileList::GetFilesForTable() const {
 	auto transaction_ref = read_info.GetTransaction();
 	auto &transaction = *transaction_ref;
-	inlined_data_tables =
-	    read_info.table.GetInlinedDataTables(transaction, read_info.snapshot, read_info.include_local_changes);
+	// a remote metadata manager returns the inlined rows with the files, so the files are read first
+	bool files_first = transaction.GetMetadataManager().IsRemote();
+	if (!files_first) {
+		inlined_data_tables =
+		    read_info.table.GetInlinedDataTables(transaction, read_info.snapshot, read_info.include_local_changes);
+	}
 	identifier_map_t<shared_ptr<DuckLakeCommittedInlinedRows>> inlined_rows;
 	if (!IsTransactionLocal(read_info.table_id)) {
 		files = ReadCommittedFiles(transaction, inlined_rows);
+	}
+	if (files_first) {
+		inlined_data_tables =
+		    read_info.table.GetInlinedDataTables(transaction, read_info.snapshot, read_info.include_local_changes);
 	}
 	if (read_info.include_local_changes) {
 		ApplyLocalChanges(transaction);

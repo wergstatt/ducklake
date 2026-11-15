@@ -1,0 +1,114 @@
+# name: test/sql/rest/rest_scan_once.test
+# description: A scan of a table asks the REST server for the file list once, which comes with the inlined rows
+# group: [rest]
+
+include test/template/rest_setup.test_template
+
+statement ok
+ATTACH 'ducklake:rest:{rest_server}' AS dl (DATA_INLINING_ROW_LIMIT 10)
+
+statement ok
+CREATE TABLE dl.t(i INTEGER)
+
+# the table has a file and inlined rows
+statement ok
+INSERT INTO dl.t SELECT * FROM range(100)
+
+statement ok
+SET VARIABLE files_version = (SELECT id FROM ducklake_current_snapshot('dl'))
+
+statement ok
+INSERT INTO dl.t VALUES (1000), (1001)
+
+statement ok rest_db:rest_server_con
+CALL enable_logging('DuckLakeMetadata')
+
+# the server reads the file list for the filters of the scan, and only once
+query I
+SELECT i FROM dl.t WHERE i > 98 ORDER BY i
+----
+99
+1000
+1001
+
+query II rest_db:rest_server_con
+SELECT count(*), count(*) FILTER (WHERE query LIKE '%col_1_stats.max_value%')
+FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE query LIKE '%data.path AS data_path%'
+----
+1	1
+
+# a scan without filters
+statement ok rest_db:rest_server_con
+CALL truncate_duckdb_logs()
+
+query I
+SELECT sum(i) FROM dl.t
+----
+6951
+
+query I rest_db:rest_server_con
+SELECT count(*) FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE query LIKE '%data.path AS data_path%'
+----
+1
+
+# a scan at an earlier snapshot, which has the file only
+statement ok rest_db:rest_server_con
+CALL truncate_duckdb_logs()
+
+query I
+SELECT max(i) FROM dl.t AT (VERSION => getvariable('files_version')) WHERE i > 50
+----
+99
+
+query I rest_db:rest_server_con
+SELECT count(*) FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE query LIKE '%data.path AS data_path%'
+----
+1
+
+# the scans of a transaction ask for one file list each
+statement ok rest_db:rest_server_con
+CALL truncate_duckdb_logs()
+
+statement ok
+BEGIN
+
+query I
+SELECT i FROM dl.t WHERE i > 1000 ORDER BY i
+----
+1001
+
+query I
+SELECT i FROM dl.t WHERE i > 98 ORDER BY i
+----
+99
+1000
+1001
+
+statement ok
+COMMIT
+
+query I rest_db:rest_server_con
+SELECT count(*) FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE query LIKE '%data.path AS data_path%'
+----
+2
+
+# the rows of the transaction are read with the inlined rows
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO dl.t VALUES (2000)
+
+query I
+SELECT i FROM dl.t WHERE i > 1000 ORDER BY i
+----
+1001
+2000
+
+statement ok
+COMMIT
+
+statement ok
+DETACH dl
+
+include test/template/rest_teardown.test_template
