@@ -1346,7 +1346,14 @@ RESTCommitTransactionResponse DuckLakeRESTCommit::Run(const RESTCommitTransactio
 		DuckLakeSchemaEntry::ThrowIfTablesCallMacros(context, catalog, dropped_macros);
 	}
 	auto transaction_ref = transaction.shared_from_this();
-	request.connection.Commit();
+	try {
+		request.connection.Commit();
+	} catch (std::exception &ex) {
+		// the error of a failed commit can repeat the SQL of the commit, which clients do not get
+		ErrorData error(ex);
+		auto message = transaction_ref->GetMetadataManager().CommitErrorWithoutQuery(error.RawMessage());
+		ErrorData(error.Type(), message).Throw();
+	}
 	RESTCommitTransactionResponse result;
 	auto committed = transaction_ref->GetCommittedSnapshot();
 	if (committed.snapshot_id != DConstants::INVALID_INDEX) {

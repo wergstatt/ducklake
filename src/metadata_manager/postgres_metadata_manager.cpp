@@ -373,7 +373,8 @@ optional_idx PostgresMetadataManager::BatchServerErrorStart(const string &messag
 
 string PostgresMetadataManager::CommitErrorWithoutQuery(const string &message) const {
 	auto server_error_start = BatchServerErrorStart(message);
-	return server_error_start.IsValid() ? message.substr(server_error_start.GetIndex()) : message;
+	// the server error follows the quote and the colon that end the query
+	return server_error_start.IsValid() ? message.substr(server_error_start.GetIndex() + 3) : message;
 }
 
 bool PostgresMetadataManager::IsRetryableCommitError(const string &message) const {

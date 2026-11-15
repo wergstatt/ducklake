@@ -1,0 +1,41 @@
+# name: test/sql/rest/rest_commit_error_without_sql.test
+# description: The error response of a failed commit does not contain the SQL that the metadata catalog ran
+# group: [rest]
+
+require json
+
+require postgres_scanner
+
+require-env DUCKLAKE_CONNECTION postgres:dbname=ducklakedb
+
+statement ok
+ATTACH '{DUCKLAKE_CONNECTION}' AS pg
+
+statement ok
+CALL postgres_execute('pg', 'DROP SCHEMA IF EXISTS rest_error_without_sql CASCADE', prepare = false)
+
+statement ok rest_db:rest_server_con
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS rest_lake (METADATA_SCHEMA 'rest_error_without_sql', DATA_PATH '{TEST_DIR}/{BASE_TEST_NAME}_files')
+
+statement ok rest_db:rest_server_con
+SET VARIABLE rest_listen_uri = (SELECT listen_uri FROM ducklake_rest_serve('rest_lake'))
+
+set variable rest_server <variable:rest_server_con:rest_listen_uri>
+
+# the metadata server refuses to store schemas
+statement ok
+CALL postgres_execute('pg', '
+CREATE FUNCTION rest_error_without_sql.refuse() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION ''refused''; END $$ LANGUAGE plpgsql;
+CREATE TRIGGER refuse BEFORE INSERT ON rest_error_without_sql.ducklake_schema FOR EACH ROW EXECUTE FUNCTION rest_error_without_sql.refuse()', prepare = false)
+
+query III
+SELECT status, response->>'$.error.message' LIKE '%refused%', response->>'$.error.message' LIKE '%INSERT INTO%'
+FROM ducklake_rest_request('{rest_server}', 'POST', '/v1/transactions/commit', '{"requests": [{"create_schema": {"placeholder_id": -1, "schema_name": "s"}}]}')
+----
+409	true	false
+
+statement ok rest_db:rest_server_con
+SELECT * FROM ducklake_rest_stop(regexp_extract(getvariable('rest_listen_uri'), '^(.*://[^/]+)', 1))
+
+statement ok
+CALL postgres_execute('pg', 'DROP SCHEMA rest_error_without_sql CASCADE', prepare = false)
