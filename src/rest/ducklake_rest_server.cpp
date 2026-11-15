@@ -339,8 +339,10 @@ void DuckLakeRESTServer::Wait() {
 //! Attaches the DuckLake in a database of its own, so the served catalog is isolated from the caller
 static shared_ptr<DatabaseInstance> OpenIsolatedDuckLake(ClientContext &context, const string &path,
                                                          const string &attach_options, const string &catalog_name) {
-	// the database of the server uses as many threads as the database that starts it
 	DBConfig config;
+	// a DuckLake that is a loadable extension has its own copy of DuckDB, which links no extensions of the caller
+	config.linked_extensions = DBConfig::GetConfig(context).linked_extensions;
+	// the database of the server uses as many threads as the database that starts it
 	config.SetOptionByName("threads",
 	                       Value::BIGINT(NumericCast<int64_t>(TaskScheduler::GetScheduler(context).NumberOfThreads())));
 	DuckDB db(nullptr, &config);
