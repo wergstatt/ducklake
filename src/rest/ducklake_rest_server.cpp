@@ -83,14 +83,27 @@ static constexpr idx_t MAX_PLANS = 256;
 //! The number of entries that the plans keep together
 static constexpr idx_t MAX_PLAN_ENTRIES = 5000000;
 
+bool DuckLakeRESTPlan::IsExpired(std::chrono::steady_clock::time_point now) const {
+	return now - created > std::chrono::seconds(PLAN_EXPIRATION_SECONDS);
+}
+
+bool DuckLakeRESTPlans::ShouldEvictOldest(std::chrono::steady_clock::time_point now, idx_t incoming_entries) const {
+	if (plans.empty()) {
+		return false;
+	}
+	auto &oldest = *plans.front().second;
+	auto is_expired = oldest.IsExpired(now);
+	auto is_at_plan_limit = plans.size() >= MAX_PLANS;
+	auto exceeds_entry_limit = entry_count + incoming_entries > MAX_PLAN_ENTRIES;
+	return is_expired || is_at_plan_limit || exceeds_entry_limit;
+}
+
 string DuckLakeRESTPlans::Add(shared_ptr<DuckLakeRESTPlan> plan) {
 	auto id = UUID::ToString(UUID::GenerateRandomUUID());
 	auto plan_entries = plan->EntryCount();
 	lock_guard<mutex> guard(lock);
 	plan->created = std::chrono::steady_clock::now();
-	while (!plans.empty() &&
-	       (plan->created - plans.front().second->created > std::chrono::seconds(PLAN_EXPIRATION_SECONDS) ||
-	        plans.size() >= MAX_PLANS || entry_count + plan_entries > MAX_PLAN_ENTRIES)) {
+	while (ShouldEvictOldest(plan->created, plan_entries)) {
 		// plans are pushed in creation order, so the front is always the oldest
 		entry_count -= plans.front().second->EntryCount();
 		plans.pop_front();
@@ -106,8 +119,7 @@ shared_ptr<DuckLakeRESTPlan> DuckLakeRESTPlans::Get(const string &id) {
 		if (entry->first != id) {
 			continue;
 		}
-		if (std::chrono::steady_clock::now() - entry->second->created >
-		    std::chrono::seconds(PLAN_EXPIRATION_SECONDS)) {
+		if (entry->second->IsExpired(std::chrono::steady_clock::now())) {
 			// LCOV_EXCL_START
 			// plans expire after PLAN_EXPIRATION_SECONDS
 			entry_count -= entry->second->EntryCount();

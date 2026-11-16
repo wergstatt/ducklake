@@ -76,6 +76,7 @@ struct DuckLakeRESTPlan {
 	idx_t EntryCount() const {
 		return files.size() + extended_files.size() + insertions.size() + deletions.size();
 	}
+	bool IsExpired(std::chrono::steady_clock::time_point now) const;
 };
 
 class DuckLakeRESTPlans {
@@ -86,6 +87,8 @@ public:
 	shared_ptr<DuckLakeRESTPlan> Get(const string &id);
 
 private:
+	bool ShouldEvictOldest(std::chrono::steady_clock::time_point now, idx_t incoming_entries) const;
+
 	mutex lock;
 	deque<pair<string, shared_ptr<DuckLakeRESTPlan>>> plans;
 	idx_t entry_count = 0;
