@@ -819,11 +819,35 @@ void DuckLakeCatalog::SetSingleWriter(bool value) {
 	known_snapshot = DuckLakeSnapshot();
 }
 
+bool DuckLakeCatalog::HasKnownSnapshot() const {
+	// a commit that only reported the id of its snapshot leaves an older snapshot behind
+	return single_writer && known_snapshot.snapshot_id != DConstants::INVALID_INDEX &&
+	       (!last_committed_snapshot.IsValid() || known_snapshot.snapshot_id >= last_committed_snapshot.GetIndex());
+}
+
+void DuckLakeCatalog::UpdateKnownSnapshot(const DuckLakeSnapshot &snapshot) {
+	if (single_writer && (known_snapshot.snapshot_id == DConstants::INVALID_INDEX ||
+	                      snapshot.snapshot_id > known_snapshot.snapshot_id)) {
+		known_snapshot = snapshot;
+	}
+}
+
+void DuckLakeCatalog::SetCommittedSnapshot(const DuckLakeSnapshot &snapshot) {
+	lock_guard<mutex> guard(commit_lock);
+	// the snapshot of a single writer follows the snapshot that it knows
+	if (HasKnownSnapshot() && known_snapshot.snapshot_id + 1 < snapshot.snapshot_id) {
+		DUCKDB_LOG_WARNING(GetDatabase(),
+		                   "DuckLake %s is the only writer of its metadata, but another writer committed the "
+		                   "snapshots %llu to %llu",
+		                   GetName().GetIdentifierName(), known_snapshot.snapshot_id + 1, snapshot.snapshot_id - 1);
+	}
+	last_committed_snapshot = snapshot.snapshot_id;
+	UpdateKnownSnapshot(snapshot);
+}
+
 unique_ptr<DuckLakeSnapshot> DuckLakeCatalog::GetKnownSnapshot() const {
 	lock_guard<mutex> guard(commit_lock);
-	// a commit that only reported the id of its snapshot leaves an older snapshot behind
-	if (!single_writer || known_snapshot.snapshot_id == DConstants::INVALID_INDEX ||
-	    (last_committed_snapshot.IsValid() && known_snapshot.snapshot_id < last_committed_snapshot.GetIndex())) {
+	if (!HasKnownSnapshot()) {
 		return nullptr;
 	}
 	return make_uniq<DuckLakeSnapshot>(known_snapshot);
@@ -831,10 +855,7 @@ unique_ptr<DuckLakeSnapshot> DuckLakeCatalog::GetKnownSnapshot() const {
 
 void DuckLakeCatalog::SetKnownSnapshot(const DuckLakeSnapshot &snapshot) {
 	lock_guard<mutex> guard(commit_lock);
-	if (single_writer && (known_snapshot.snapshot_id == DConstants::INVALID_INDEX ||
-	                      snapshot.snapshot_id > known_snapshot.snapshot_id)) {
-		known_snapshot = snapshot;
-	}
+	UpdateKnownSnapshot(snapshot);
 }
 
 void DuckLakeCatalog::SetEntryOids(const ducklake_entry_oids_t &oids) {

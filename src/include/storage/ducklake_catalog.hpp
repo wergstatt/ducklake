@@ -394,6 +394,9 @@ public:
 		lock_guard<mutex> guard(commit_lock);
 		last_committed_snapshot = value;
 	}
+	//! Records a committed snapshot, warning if a single writer sees a gap from another writer, and updates the known
+	//! snapshot
+	void SetCommittedSnapshot(const DuckLakeSnapshot &snapshot);
 	//! Declares this catalog the only writer of its metadata, which then knows the latest snapshot after it read or
 	//! committed it, without asking the metadata again
 	void SetSingleWriter(bool value);
@@ -535,6 +538,10 @@ private:
 	bool UnregisterCatalog();
 	//! Gives an entry loaded from the catalog the oid of its id, so it keeps its oid across snapshots
 	void AssignStableOid(CatalogEntry &entry, idx_t id);
+	//! Whether known_snapshot is valid and up to date with last_committed_snapshot (requires commit_lock)
+	bool HasKnownSnapshot() const;
+	//! Keeps the snapshot as known_snapshot if single_writer and newer (requires commit_lock)
+	void UpdateKnownSnapshot(const DuckLakeSnapshot &snapshot);
 
 private:
 	//! The oid of each loaded or committed entry

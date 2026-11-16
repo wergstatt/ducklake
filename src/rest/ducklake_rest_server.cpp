@@ -82,8 +82,22 @@ void DuckLakeRESTServer::AddCatalog(const string &prefix, shared_ptr<DatabaseIns
 		throw InvalidInputException("The prefix of a catalog has to be a name without slashes, not \"%s\"", prefix);
 	}
 	SetSingleWriter(*db, catalog_name, single_writer);
-	lock_guard<mutex> guard(catalog_lock);
-	catalogs[prefix] = ServedCatalog {prefix, std::move(db), std::move(catalog_name)};
+	ServedCatalog replaced;
+	bool same_catalog = false;
+	{
+		lock_guard<mutex> guard(catalog_lock);
+		auto entry = catalogs.find(prefix);
+		if (entry != catalogs.end()) {
+			replaced = std::move(entry->second);
+			same_catalog = replaced.db == db && replaced.catalog_name == catalog_name;
+			entry->second = ServedCatalog {prefix, std::move(db), std::move(catalog_name)};
+		} else {
+			catalogs.emplace(prefix, ServedCatalog {prefix, std::move(db), std::move(catalog_name)});
+		}
+	}
+	if (replaced.db && !same_catalog) {
+		SetSingleWriter(*replaced.db, replaced.catalog_name, false);
+	}
 }
 
 //! Plans expire after this many seconds
