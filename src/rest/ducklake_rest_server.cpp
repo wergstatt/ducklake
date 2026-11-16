@@ -84,49 +84,40 @@ static constexpr idx_t MAX_PLANS = 256;
 static constexpr idx_t MAX_PLAN_ENTRIES = 5000000;
 
 string DuckLakeRESTPlans::Add(shared_ptr<DuckLakeRESTPlan> plan) {
-	plan->created = std::chrono::steady_clock::now();
 	auto id = UUID::ToString(UUID::GenerateRandomUUID());
+	auto plan_entries = plan->EntryCount();
 	lock_guard<mutex> guard(lock);
-	for (auto entry = plans.begin(); entry != plans.end();) {
-		if (plan->created - entry->second->created > std::chrono::seconds(PLAN_EXPIRATION_SECONDS)) {
-			entry = plans.erase(entry); // LCOV_EXCL_LINE: plans expire after PLAN_EXPIRATION_SECONDS
-		} else {
-			entry++;
-		}
+	plan->created = std::chrono::steady_clock::now();
+	while (!plans.empty() &&
+	       (plan->created - plans.front().second->created > std::chrono::seconds(PLAN_EXPIRATION_SECONDS) ||
+	        plans.size() >= MAX_PLANS || entry_count + plan_entries > MAX_PLAN_ENTRIES)) {
+		// plans are pushed in creation order, so the front is always the oldest
+		entry_count -= plans.front().second->EntryCount();
+		plans.pop_front();
 	}
-	idx_t entry_count = plan->EntryCount();
-	for (auto &entry : plans) {
-		entry_count += entry.second->EntryCount();
-	}
-	while (!plans.empty() && (plans.size() >= MAX_PLANS || entry_count > MAX_PLAN_ENTRIES)) {
-		// the oldest plan goes, the new plan stays
-		auto oldest = plans.begin();
-		for (auto entry = plans.begin(); entry != plans.end(); entry++) {
-			if (entry->second->created < oldest->second->created) {
-				oldest = entry;
-			}
-		}
-		entry_count -= oldest->second->EntryCount();
-		plans.erase(oldest);
-	}
-	plans.emplace(id, std::move(plan));
+	entry_count += plan_entries;
+	plans.emplace_back(id, std::move(plan));
 	return id;
 }
 
 shared_ptr<DuckLakeRESTPlan> DuckLakeRESTPlans::Get(const string &id) {
 	lock_guard<mutex> guard(lock);
-	auto entry = plans.find(id);
-	if (entry == plans.end()) {
-		return nullptr;
+	for (auto entry = plans.begin(); entry != plans.end(); entry++) {
+		if (entry->first != id) {
+			continue;
+		}
+		if (std::chrono::steady_clock::now() - entry->second->created >
+		    std::chrono::seconds(PLAN_EXPIRATION_SECONDS)) {
+			// LCOV_EXCL_START
+			// plans expire after PLAN_EXPIRATION_SECONDS
+			entry_count -= entry->second->EntryCount();
+			plans.erase(entry);
+			return nullptr;
+			// LCOV_EXCL_STOP
+		}
+		return entry->second;
 	}
-	if (std::chrono::steady_clock::now() - entry->second->created > std::chrono::seconds(PLAN_EXPIRATION_SECONDS)) {
-		// LCOV_EXCL_START
-		// plans expire after PLAN_EXPIRATION_SECONDS
-		plans.erase(entry);
-		return nullptr;
-		// LCOV_EXCL_STOP
-	}
-	return entry->second;
+	return nullptr;
 }
 
 void DuckLakeRESTServer::SetClientProperties(map<string, string> defaults, map<string, string> overrides) {

@@ -9,7 +9,9 @@
 #pragma once
 
 #include "duckdb/common/common.hpp"
+#include "duckdb/common/deque.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/common/pair.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "rest/ducklake_rest_api.hpp"
@@ -85,7 +87,8 @@ public:
 
 private:
 	mutex lock;
-	map<string, shared_ptr<DuckLakeRESTPlan>> plans;
+	deque<pair<string, shared_ptr<DuckLakeRESTPlan>>> plans;
+	idx_t entry_count = 0;
 };
 
 //! An HTTP server that exposes DuckLake catalogs through the DuckLake REST API. The URLs of a catalog have its prefix
