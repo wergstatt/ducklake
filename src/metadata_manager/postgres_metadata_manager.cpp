@@ -357,40 +357,15 @@ string PostgresMetadataManager::GetColumnTypeInternal(const LogicalType &column_
 	}
 }
 
-optional_idx PostgresMetadataManager::BatchServerErrorStart(const string &message) const {
-	// the batch and the server error can contain any text, so the batch is found by its size
-	const string failed_batch = "Failed to execute query \"";
-	auto batch_start = message.find(failed_batch);
-	if (batch_start == string::npos) {
-		return optional_idx();
-	}
-	auto batch_end = batch_start + failed_batch.size() + executed_query_size;
-	if (batch_end + 3 > message.size() || message.compare(batch_end, 3, "\": ") != 0) {
-		return optional_idx();
-	}
-	return batch_end;
-}
-
-string PostgresMetadataManager::CommitErrorWithoutQuery(const string &message) const {
-	auto server_error_start = BatchServerErrorStart(message);
-	// the server error follows the quote and the colon that end the query
-	return server_error_start.IsValid() ? message.substr(server_error_start.GetIndex() + 3) : message;
-}
-
 bool PostgresMetadataManager::IsRetryableCommitError(const string &message) const {
-	auto batch_server_error_start = BatchServerErrorStart(message);
-	// for another failed query, the server error is guessed to follow the last quote and colon
-	auto server_error_start =
-	    batch_server_error_start.IsValid() ? batch_server_error_start.GetIndex() : message.rfind("\": ");
-	auto server_error = server_error_start == string::npos ? message : message.substr(server_error_start);
 	// constraint names are not translated, so a conflict on a metadata primary key is found in any language
-	for (auto end = server_error.find("_pkey"); end != string::npos; end = server_error.find("_pkey", end + 1)) {
+	for (auto end = message.find("_pkey"); end != string::npos; end = message.find("_pkey", end + 1)) {
 		auto start = end;
 		while (start > 0 &&
-		       (StringUtil::CharacterIsAlphaNumeric(server_error[start - 1]) || server_error[start - 1] == '_')) {
+		       (StringUtil::CharacterIsAlphaNumeric(message[start - 1]) || message[start - 1] == '_')) {
 			start--;
 		}
-		if (StringUtil::StartsWith(server_error.substr(start, end - start), "ducklake_")) {
+		if (StringUtil::StartsWith(message.substr(start, end - start), "ducklake_")) {
 			return true;
 		}
 	}
@@ -485,6 +460,27 @@ string PostgresMetadataManager::ConfigOptionLockSql() const {
 	return "UPDATE {METADATA_CATALOG}.ducklake_metadata SET value = value WHERE key = 'version' AND scope IS NULL;\n";
 }
 
+static void StripExecutedQueryFromError(QueryResult &result, idx_t query_size) {
+	auto &error = result.GetErrorObject();
+	const auto &message = error.RawMessage();
+	// the batch and the server error can contain any text, so the batch is found by its size
+	const string failed_batch = "Failed to execute query \"";
+	auto batch_start = message.find(failed_batch);
+	if (batch_start == string::npos) {
+		return;
+	}
+	auto batch_end = batch_start + failed_batch.size() + query_size;
+	if (batch_end + 3 > message.size() || message.compare(batch_end, 3, "\": ") != 0) {
+		return;
+	}
+	auto stripped = message.substr(0, batch_start) + message.substr(batch_end + 3);
+	if (error.ExtraInfo().empty()) {
+		result.SetError(ErrorData(error.Type(), stripped));
+	} else {
+		result.SetError(ErrorData(Exception::ToJSON(error.ExtraInfo(), error.Type(), stripped)));
+	}
+}
+
 unique_ptr<QueryResult> PostgresMetadataManager::Execute(DuckLakeSnapshot snapshot, string &query) {
 	SubstituteTransactionPlaceholders(snapshot, query);
 	auto &ducklake_catalog = transaction.GetCatalog();
@@ -498,9 +494,12 @@ unique_ptr<QueryResult> PostgresMetadataManager::Execute(DuckLakeSnapshot snapsh
 	query = "SET LOCAL extra_float_digits = 3;" + query;
 	// the scanner drops trailing semicolons before it repeats the query in an error
 	StringUtil::RTrim(query, "; \t\n\v\f\r");
-	executed_query_size = query.size();
-	return transaction.ExecuteRaw(
+	auto result = transaction.ExecuteRaw(
 	    StringUtil::Format("CALL postgres_execute(%s, %s, prepare=FALSE)", catalog_literal, SQLString(query)));
+	if (result->HasError()) {
+		StripExecutedQueryFromError(*result, query.size());
+	}
+	return result;
 }
 
 unique_ptr<QueryResult> PostgresMetadataManager::ExecuteDropInTransaction(string &query) {
