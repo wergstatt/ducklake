@@ -30,6 +30,8 @@ CALL disable_logging()
 
 query I
 SELECT count(DISTINCT transaction_id) FROM duckdb_logs
-  WHERE type = 'QueryLog' AND (message LIKE '%ducklake_inlined_data_1_1%' OR message LIKE '%ducklake_snapshot VALUES%')
+  WHERE type = 'QueryLog'
+    AND (message LIKE '%ducklake_inlined_data_1_1%' OR message LIKE '%ducklake_table_stats%'
+         OR message LIKE '%ducklake_schema_versions%' OR message LIKE '%ducklake_snapshot%')
 ----
 2

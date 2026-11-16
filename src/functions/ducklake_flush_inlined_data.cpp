@@ -221,10 +221,10 @@ class DuckLakeLogicalFlush : public LogicalExtensionOperator {
 public:
 	DuckLakeLogicalFlush(TableIndex table_index, DuckLakeTableEntry &table, DuckLakeInlinedTableInfo inlined_table_p,
 	                     shared_ptr<DuckLakeCommittedInlinedRows> inlined_rows_p, string encryption_key_p,
-	                     optional_idx partition_id_p, bool release_metadata_transaction)
+	                     optional_idx partition_id_p)
 	    : table_index(table_index), table(table), inlined_table(std::move(inlined_table_p)),
 	      inlined_rows(std::move(inlined_rows_p)), encryption_key(std::move(encryption_key_p)),
-	      partition_id(partition_id_p), release_metadata_transaction(release_metadata_transaction) {
+	      partition_id(partition_id_p) {
 	}
 
 	TableIndex table_index;
@@ -233,14 +233,15 @@ public:
 	shared_ptr<DuckLakeCommittedInlinedRows> inlined_rows;
 	string encryption_key;
 	optional_idx partition_id;
-	bool release_metadata_transaction;
+	//! Set when Bind flushed file deletions, making ChangesMade() true before CreatePlan runs
+	bool release_metadata_transaction = false;
 
 public:
 	PhysicalOperator &CreatePlan(ClientContext &context, PhysicalPlanGenerator &planner) override {
 		auto &child = planner.CreatePlan(*children[0]);
-		if (release_metadata_transaction) {
-			// the optimizer reads table stats after the bind released the metadata transaction
-			DuckLakeTransaction::Get(context, table.catalog).ReleaseMetadataTransaction();
+		auto &transaction = DuckLakeTransaction::Get(context, table.catalog);
+		if (context.transaction.IsAutoCommit() && (!transaction.ChangesMade() || release_metadata_transaction)) {
+			transaction.ReleaseMetadataTransaction();
 		}
 		return planner.Make<DuckLakeFlushData>(types, table, std::move(inlined_table), std::move(inlined_rows),
 		                                       std::move(encryption_key), partition_id, child);
@@ -268,8 +269,7 @@ public:
 class DuckLakeDataFlusher {
 public:
 	DuckLakeDataFlusher(ClientContext &context, DuckLakeCatalog &catalog, DuckLakeTransaction &transaction,
-	                    Binder &binder, TableIndex table_id, const DuckLakeInlinedTableInfo &inlined_table,
-	                    bool release_metadata_transaction);
+	                    Binder &binder, TableIndex table_id, const DuckLakeInlinedTableInfo &inlined_table);
 
 	unique_ptr<LogicalOperator> GenerateFlushCommand();
 
@@ -282,15 +282,13 @@ private:
 	Binder &binder;
 	TableIndex table_id;
 	const DuckLakeInlinedTableInfo &inlined_table;
-	bool release_metadata_transaction;
 };
 
 DuckLakeDataFlusher::DuckLakeDataFlusher(ClientContext &context, DuckLakeCatalog &catalog,
                                          DuckLakeTransaction &transaction, Binder &binder, TableIndex table_id,
-                                         const DuckLakeInlinedTableInfo &inlined_table_p,
-                                         bool release_metadata_transaction)
+                                         const DuckLakeInlinedTableInfo &inlined_table_p)
     : context(context), catalog(catalog), transaction(transaction), binder(binder), table_id(table_id),
-      inlined_table(inlined_table_p), release_metadata_transaction(release_metadata_transaction) {
+      inlined_table(inlined_table_p) {
 }
 
 string DuckLakeDataFlusher::GetFlushSortOrderSQL(const DuckLakeTableEntry &table) {
@@ -345,9 +343,9 @@ unique_ptr<LogicalOperator> DuckLakeDataFlusher::GenerateFlushCommand() {
 	copy->children.push_back(std::move(root));
 
 	// followed by the compaction operator (that writes the results back to the
-	auto compaction = make_uniq<DuckLakeLogicalFlush>(binder.GenerateTableIndex(), table, inlined_table,
-	                                                  std::move(inlined_rows), std::move(copy_input.encryption_key),
-	                                                  partition_id, release_metadata_transaction);
+	auto compaction =
+	    make_uniq<DuckLakeLogicalFlush>(binder.GenerateTableIndex(), table, inlined_table, std::move(inlined_rows),
+		                                std::move(copy_input.encryption_key), partition_id);
 	compaction->children.push_back(std::move(copy));
 	return std::move(compaction);
 }
@@ -520,13 +518,20 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context, 
 		}
 		for (auto &inlined_table : table_entry.GetInlinedDataTables(transaction, transaction.GetSnapshot())) {
 			DuckLakeDataFlusher flusher(context, ducklake_catalog, transaction, *input.binder, table_entry.GetTableId(),
-			                            inlined_table, release_metadata_transaction);
+			                            inlined_table);
 			flushes.push_back(flusher.GenerateFlushCommand());
 		}
-		file_deletions.emplace_back(table_entry, ReadInlinedFileDeletions(transaction, table_entry));
+		auto deletions = ReadInlinedFileDeletions(transaction, table_entry);
+		if (!deletions.empty()) {
+			file_deletions.emplace_back(table_entry, std::move(deletions));
+		}
 	}
-	if (release_metadata_transaction) {
+	if (release_metadata_transaction && !file_deletions.empty()) {
+		// FlushInlinedFileDeletions writes delete files and records local changes before CreatePlan runs
 		transaction.ReleaseMetadataTransaction();
+		for (auto &flush : flushes) {
+			flush->Cast<DuckLakeLogicalFlush>().release_metadata_transaction = true;
+		}
 	}
 	for (auto &entry : file_deletions) {
 		FlushInlinedFileDeletions(context, ducklake_catalog, transaction, entry.first, entry.second);
