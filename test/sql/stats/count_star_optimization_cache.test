@@ -41,3 +41,8 @@ query I
 SELECT COUNT(*) FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE query LIKE '%SUM(record_count)%';
 ----
 2
+
+query I
+SELECT COUNT(*) FROM duckdb_logs_parsed('DuckLakeMetadata') WHERE query LIKE '%ducklake_delete_file del%' AND query LIKE '%AND data.table_id = %';
+----
+2
